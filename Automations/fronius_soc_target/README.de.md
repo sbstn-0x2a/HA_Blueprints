@@ -39,8 +39,7 @@ Wenn der Post-Peak-Solarertrag nicht ausreicht, um den Akku von `target_soc` auf
 - **Akku:** BYD Battery Box Premium HV (oder kompatibles BMS mit `select`-Modusentität und `number`-Ladeleistungsentität)
 - **Solarprognose:** [Open-Meteo Solar Forecast](https://github.com/flowolf/ha-open-meteo-solar-forecast) via HACS, mit `wh_period`-Attribut und einem *Remaining*-Sensor
 - **Stromzähler:** Beliebiger Energiezähler mit vorzeichenbehafteter Netzleistung (negativ = Einspeisung), z.B. Shelly Pro 3EM
-- **E-Auto-Laden (optional):** [evcc](https://evcc.io/) mit binären `connected`-Sensoren je Ladepunkt
-
+- **E-Auto-Laden (optional):** [evcc](https://evcc.io/) mit [ha-evcc](https://github.com/marq24/ha-evcc) HACS Integration und binären `connected`-Sensoren je Ladepunkt
 ---
 
 ## Konfiguration
