@@ -39,7 +39,7 @@ If post-peak solar yield is not sufficient to charge the battery from `target_so
 - **Battery:** BYD Battery Box Premium HV (or compatible BMS with `select` mode control and `number` charge limit entity)
 - **Solar Forecast:** [Open-Meteo Solar Forecast](https://github.com/flowolf/ha-open-meteo-solar-forecast) HACS integration with `wh_period` attribute and a *remaining* sensor
 - **Grid Meter:** Any energy meter with signed grid power (negative = feed-in), e.g. Shelly Pro 3EM
-- **EV Charging (optional):** [evcc](https://evcc.io/) with binary `connected` sensors per charger
+- **EV Charging (optional):** [evcc](https://evcc.io/) with [ha-evcc](https://github.com/marq24/ha-evcc) HACS integration with binary `connected` sensors per charger
 
 ---
 
