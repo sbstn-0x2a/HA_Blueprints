@@ -1,0 +1,443 @@
+blueprint:
+  name: Solar Battery SOC Target Control
+  description: >
+    Regelt die Akku-Ladeleistung dynamisch in drei Phasen: Vor dem Peak wird
+    der Akku gleichmäßig auf den Ziel-SOC geladen (z.B. 55%), um genug Puffer
+    für die Mittagsüberproduktion zu halten. Ist der Ziel-SOC bereits erreicht,
+    wird der verbleibende Laderaum bis zum Maximum (z.B. 97%) gleichmäßig über
+    das gesamte aktive Zeitfenster (bis Peak + Nachlaufzeit) verteilt. Nach dem
+    Peak lädt die Automation den Akku kontrolliert auf das Maximum – verteilt
+    auf die verbleibende Nachlaufzeit. Die Ladeleistung wird in allen Phasen
+    durch die berechnete Bedarfsrate gedeckelt, um Überschießen zu vermeiden.
+    Netzbezug wird stets verhindert; bei angestecktem E-Auto ist die Automation
+    inaktiv.
+  domain: automation
+  input:
+    peak_time_sensor:
+      name: Peakzeit-Sensor (UTC)
+      description: >
+        Open-Meteo Solar Forecast Sensor mit dem Zeitpunkt der höchsten
+        Leistung (z.B. sensor.power_highest_peak_time_today).
+      selector:
+        entity: {}
+
+    solar_forecast_sensor:
+      name: Solar Forecast Sensor (kWh)
+      description: >
+        Open-Meteo Solar Forecast Sensor für den Tagesertrag mit
+        wh_period-Attribut (z.B. sensor.energy_production_today).
+      selector:
+        entity: {}
+
+    remaining_sensor:
+      name: Verbleibender Tagesertrag (kWh)
+      description: >
+        Open-Meteo Sensor für den noch erwarteten Solarertrag heute
+        (z.B. sensor.energy_production_today_remaining). Wird für die
+        Aktivierungsgrenze und die adaptive Ziel-SOC-Berechnung genutzt.
+      selector:
+        entity: {}
+
+    soc_sensor:
+      name: Akku SOC Sensor (%)
+      selector:
+        entity: {}
+
+    pv_power_sensor:
+      name: PV-Leistung (WR-Ausgang, W)
+      description: Aktuelle Gesamtleistung der Solaranlage.
+      selector:
+        entity: {}
+
+    grid_power_sensor:
+      name: Netzsensor (± W)
+      description: Negativ = Einspeisung, Positiv = Netzbezug (z.B. Shelly 3EM).
+      selector:
+        entity: {}
+
+    control_mode_select:
+      name: BMS Steuerungsmodus
+      description: Select-Entität für die Betriebsmodi des BMS.
+      selector:
+        entity: {}
+
+    charge_limit_number:
+      name: Ladeleistungs-Entität
+      description: >
+        Number-Entität für die Ladeleistungsvorgabe ans BMS. Nur aktiv
+        wenn Modus nicht Auto ist.
+      selector:
+        entity: {}
+
+    ev_connected_sensor_1:
+      name: E-Auto 1 – angesteckt (Binary Sensor, optional)
+      description: >
+        EVCC Binary Sensor der anzeigt ob E-Auto 1 am Ladepunkt angeschlossen ist
+        (z.B. binary_sensor.evcc_nrgkick_connected). Automation ist inaktiv solange
+        ein Auto angesteckt ist. Leer lassen wenn kein E-Auto vorhanden.
+      default: ""
+      selector:
+        entity:
+          domain: binary_sensor
+
+    ev_connected_sensor_2:
+      name: E-Auto 2 – angesteckt (Binary Sensor, optional)
+      description: >
+        EVCC Binary Sensor für E-Auto 2. Leer lassen wenn kein zweites E-Auto vorhanden.
+      default: ""
+      selector:
+        entity:
+          domain: binary_sensor
+
+    option_on_load:
+      name: Modus bei aktivem Laden
+      default: "PV Charge Limit"
+      selector:
+        select:
+          options:
+            - "Auto"
+            - "PV Charge Limit"
+            - "Discharge Limit"
+            - "PV Charge and Discharge Limit"
+            - "Charge from Grid"
+            - "Discharge to Grid"
+            - "Block Discharging"
+            - "Block Charging"
+
+    option_off_load:
+      name: Modus bei inaktivem Laden (Auto)
+      default: "Auto"
+      selector:
+        select:
+          options:
+            - "Auto"
+            - "PV Charge Limit"
+            - "Discharge Limit"
+            - "PV Charge and Discharge Limit"
+            - "Charge from Grid"
+            - "Discharge to Grid"
+            - "Block Discharging"
+            - "Block Charging"
+
+    battery_capacity_kwh:
+      name: Akku-Kapazität (kWh)
+      description: >
+        Nutzbare Kapazität des Akkus in kWh. Grundlage für die Berechnung
+        der benötigten Ladeleistung (z.B. 20.38 für BYD HVS 20).
+      default: 10.0
+      selector:
+        number:
+          min: 1
+          max: 100
+          step: 0.1
+          unit_of_measurement: kWh
+
+    target_soc_at_peak:
+      name: Ziel-SOC bei Peak (%)
+      description: >
+        Gewünschter Ladestand zum Zeitpunkt des Leistungspeaks. Puffer
+        für die Mittags-Überproduktion – z.B. 55% bedeutet 45% freie
+        Kapazität zum Absorb­ieren der solaren Spitze.
+      default: 55
+      selector:
+        number:
+          min: 10
+          max: 95
+          step: 1
+          unit_of_measurement: "%"
+
+    soc_max:
+      name: SOC-Maximum für Auto-Umschaltung (%)
+      description: >
+        Ab diesem SOC wird immer auf Auto geschaltet. Der Fronius
+        übernimmt dann das Einspeisemanagement und lädt auf 100%.
+      default: 97
+      selector:
+        number:
+          min: 50
+          max: 100
+          step: 1
+          unit_of_measurement: "%"
+
+    max_charge_power:
+      name: Maximale Ladeleistung (W)
+      description: Obergrenze der Ladeleistung (Hardware-Maximum des BMS).
+      default: 6000
+      selector:
+        number:
+          min: 500
+          max: 15000
+          step: 100
+          unit_of_measurement: W
+
+    min_charge_power:
+      name: Minimale Ladeleistung (W)
+      description: >
+        Untergrenze wenn der berechnete Bedarf sehr klein ist (z.B. bei
+        langem Vorlauf). Verhindert zu geringe Werte.
+      default: 500
+      selector:
+        number:
+          min: 0
+          max: 3000
+          step: 100
+          unit_of_measurement: W
+
+    pre_peak_hours:
+      name: Vorlaufzeit vor Peak (h)
+      description: >
+        Wie viele Stunden vor dem Peak beginnt die Ladesteuerung.
+        Außerhalb dieses Fensters ist die Automation inaktiv (Auto-Modus).
+      default: 7
+      selector:
+        number:
+          min: 1
+          max: 12
+          step: 0.5
+          unit_of_measurement: h
+
+    post_peak_hours:
+      name: Nachlaufzeit nach Peak (h)
+      description: >
+        Wie viele Stunden nach dem Peak läuft die Begrenzungslogik noch weiter,
+        sofern noch Solarertrag vorhanden ist. Danach wechselt die Automation
+        in den Auto-Modus.
+      default: 2
+      selector:
+        number:
+          min: 0
+          max: 6
+          step: 0.5
+          unit_of_measurement: h
+
+    grid_feed_limit:
+      name: Netz-Einspeiselimit (W)
+      description: Einspeiselimit gem. §14a EnWG oder Netzbetreibervorgabe.
+      default: 7200
+      selector:
+        number:
+          min: 0
+          max: 30000
+          step: 50
+          unit_of_measurement: W
+
+    tolerance:
+      name: Toleranz unterhalb Einspeiselimit (W)
+      description: >
+        Ab diesem Abstand unter dem Limit wird die Ladeleistung erhöht.
+        Sollte mit der Schrittweite übereinstimmen.
+      default: 350
+      selector:
+        number:
+          min: 0
+          max: 2000
+          step: 50
+          unit_of_measurement: W
+
+    step_w:
+      name: Regelschrittweite (W)
+      description: Schrittweite je Regelzyklus für das Hoch-/Runterregeln.
+      default: 500
+      selector:
+        number:
+          min: 100
+          max: 2000
+          step: 100
+          unit_of_measurement: W
+
+    forecast_limit:
+      name: Mindest-Tagesertrag für Aktivierung (kWh)
+      description: >
+        Automation bleibt inaktiv wenn der prognostizierte Tagesertrag
+        darunter liegt (schlechtes Wetter).
+      default: 40
+      selector:
+        number:
+          min: 0
+          max: 80
+          step: 1
+          unit_of_measurement: kWh
+
+    peak_power_limit:
+      name: Mindest-Peak-Leistung für Aktivierung (kWh)
+      description: >
+        Automation bleibt inaktiv wenn die prognostizierte Peak-Stunden-
+        Energie darunter liegt.
+      default: 7.5
+      selector:
+        number:
+          min: 0
+          max: 20
+          step: 0.1
+          unit_of_measurement: kWh
+
+    read_scale_factor:
+      name: Skalierungsfaktor für Rücklesung (Divisor)
+      description: >
+        Korrekturfaktor für die Rücklesung der aktuellen Ladeleistung
+        vom BMS. Normalerweise 1. Nur ändern wenn Anzeigefehler vorliegt.
+      default: 1
+      selector:
+        number:
+          min: 1
+          max: 1000
+          step: 0.1
+
+trigger:
+  - platform: time_pattern
+    minutes: /5
+  - platform: state
+    entity_id: !input peak_time_sensor
+
+action:
+  - variables:
+      # Input-Aliase
+      peak_sensor: !input peak_time_sensor
+      forecast_sensor: !input solar_forecast_sensor
+      remaining_sensor: !input remaining_sensor
+      soc_entity: !input soc_sensor
+      grid_sensor: !input grid_power_sensor
+      mode_entity: !input control_mode_select
+      limit_entity: !input charge_limit_number
+      on_mode: !input option_on_load
+      off_mode: !input option_off_load
+      battery_kwh: !input battery_capacity_kwh
+      target_soc: !input target_soc_at_peak
+      soc_limit: !input soc_max
+      max_charge_w: !input max_charge_power
+      min_charge_w: !input min_charge_power
+      pre_peak_h: !input pre_peak_hours
+      post_peak_h: !input post_peak_hours
+      feed_limit: !input grid_feed_limit
+      tol: !input tolerance
+      step: !input step_w
+      f_limit: !input forecast_limit
+      pp_limit: !input peak_power_limit
+      scale: !input read_scale_factor
+      ev1_entity: !input ev_connected_sensor_1
+      ev2_entity: !input ev_connected_sensor_2
+
+      # Sensormesswerte
+      now_ts: "{{ now() }}"
+      peak: "{{ as_datetime(states[peak_sensor].state) | as_local }}"
+
+      peak_power: >
+        {% set wh_data = state_attr(forecast_sensor, 'wh_period') %}
+        {% if wh_data %}
+          {% set max_entry = wh_data | dictsort(by='value') | reverse | first %}
+          {{ (max_entry[1] / 1000) | round(2) }}
+        {% else %}
+          0
+        {% endif %}
+
+      hours_to_peak: >
+        {{ ((as_timestamp(peak) - as_timestamp(now_ts)) / 3600) | round(2) }}
+
+      forecast_val: "{{ states[forecast_sensor].state | float(0) }}"
+      remaining_val: "{{ states[remaining_sensor].state | float(0) }}"
+      current_soc: "{{ states[soc_entity].state | float(0) }}"
+      grid_power: "{{ states[grid_sensor].state | float(0) }}"
+      current_charge: >
+        {% set raw = (states[limit_entity].state | float(0) / scale) | round(0) | int %}
+        {{ [raw, max_charge_w | int] | min }}
+      ev_connected: >
+        {{ (ev1_entity != '' and is_state(ev1_entity, 'on'))
+           or (ev2_entity != '' and is_state(ev2_entity, 'on')) }}
+
+      # Erwarteter Solarertrag nach dem Peak (aus wh_period-Attribut aufsummiert).
+      # Genauer als remaining_val, da nur Post-Peak-Einträge gezählt werden.
+      # Fallback auf remaining_val wenn wh_period nicht verfügbar.
+      post_peak_kwh: >
+        {% set wh_data = state_attr(forecast_sensor, 'wh_period') %}
+        {% if wh_data %}
+          {% set ns = namespace(total=0) %}
+          {% for ts, wh in wh_data.items() %}
+            {% if as_timestamp(ts) > as_timestamp(peak) %}
+              {% set ns.total = ns.total + wh %}
+            {% endif %}
+          {% endfor %}
+          {{ (ns.total / 1000) | round(2) }}
+        {% else %}
+          {{ remaining_val }}
+        {% endif %}
+
+      # Adaptiver Ziel-SOC:
+      # Wenn der Post-Peak-Ertrag nicht ausreicht um den Akku von target_soc
+      # auf soc_max zu laden, wird der Ziel-SOC entsprechend angehoben.
+      # Beispiel: target=55%, soc_max=97%, Akku=20.38kWh → benötigt 8.56kWh nach Peak.
+      # Kommt nur 5kWh → Defizit 3.56kWh → ~17.5% extra → effektives Ziel = 72.5%
+      effective_target_soc: >
+        {% set needed_kwh = (soc_limit - target_soc) | float / 100 * battery_kwh %}
+        {% set deficit_kwh = [needed_kwh - post_peak_kwh, 0] | max %}
+        {% set extra_soc = (deficit_kwh / battery_kwh * 100) | round(0) | int %}
+        {{ [target_soc + extra_soc, soc_limit | int] | min }}
+
+      # Aktivierungsbedingung:
+      # Vor Peak:  innerhalb pre_peak_h, SOC unter Maximum
+      # Nach Peak: innerhalb post_peak_h UND noch Solarertrag vorhanden
+      active_phase: >
+        {{ hours_to_peak < pre_peak_h
+           and hours_to_peak > -post_peak_h
+           and current_soc < soc_limit
+           and (hours_to_peak >= 0 or remaining_val > 0) }}
+
+      # Benötigte Ladeleistung, abhängig von der aktuellen Phase:
+      #   SOC < Ziel, vor Peak:           Lücke zu effective_target_soc verteilt auf hours_to_peak
+      #   SOC >= Ziel, vor Peak:          Lücke zu soc_max verteilt auf (hours_to_peak + post_peak_h)
+      #   Nach Peak (innerhalb Fenster):  Lücke zu soc_max verteilt auf verbleibende Post-Peak-Zeit
+      required_w: >
+        {% if hours_to_peak > 0 and current_soc < effective_target_soc %}
+          {% set gap = [effective_target_soc - current_soc, 0] | max %}
+          {% set hours = [hours_to_peak, 0.25] | max %}
+          {% set needed = (gap / 100 * battery_kwh * 1000 / hours) | round(0) %}
+          {{ [[needed, min_charge_w] | max, max_charge_w] | min }}
+        {% else %}
+          {% set gap = [soc_limit - current_soc, 0] | max %}
+          {% set hours = [hours_to_peak + post_peak_h, 0.25] | max %}
+          {% set needed = (gap / 100 * battery_kwh * 1000 / hours) | round(0) %}
+          {{ [[needed, min_charge_w] | max, max_charge_w] | min }}
+        {% endif %}
+
+      # Ziel-Ladeleistung nach Netzleistungszonen:
+      #   Zone 1 (Netzbezug):           0W – kein Laden aus dem Netz
+      #   Zone 2 (Einspeisung < Limit): sanft hochregeln bis required_w
+      #   Zone 3 (am/über Limit):       hochregeln bis required_w (immer gedeckelt, kein Überschießen)
+      target_w: >
+        {% set current = current_charge | int %}
+        {% set req = required_w | int %}
+        {% set s = step | int %}
+        {% set threshold = -(feed_limit | float) + (tol | float) %}
+        {% if current_soc >= soc_limit %}
+          0
+        {% elif ev_connected %}
+          0
+        {% elif not active_phase %}
+          0
+        {% elif forecast_val < f_limit %}
+          0
+        {% elif peak_power < pp_limit %}
+          0
+        {% elif grid_power > 100 %}
+          {{ [current - s, 0] | max }}
+        {% else %}
+          {{ [current + s, req] | min }}
+        {% endif %}
+
+  - service: select.select_option
+    target:
+      entity_id: "{{ mode_entity }}"
+    data:
+      option: >
+        {% if target_w | int > 0 %}
+          {{ on_mode }}
+        {% else %}
+          {{ off_mode }}
+        {% endif %}
+
+  - service: number.set_value
+    target:
+      entity_id: "{{ limit_entity }}"
+    data:
+      value: "{{ target_w | int }}"
+
+mode: single
