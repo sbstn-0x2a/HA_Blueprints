@@ -417,6 +417,8 @@ action:
           0
         {% elif peak_power < pp_limit %}
           0
+        {% elif grid_power <= threshold %}
+          {{ [current + s, max_charge_w] | min }}
         {% elif grid_power > 100 %}
           {{ [current - s, 0] | max }}
         {% else %}
