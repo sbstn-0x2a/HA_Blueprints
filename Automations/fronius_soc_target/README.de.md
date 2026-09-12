@@ -6,7 +6,7 @@ Ein Home Assistant Blueprint zur dynamischen Solarakku-Ladesteuerung — optimie
 
 🇬🇧 [English version](/Automations/fronius_soc_target/README.md)
 
-[![Blueprint in Home Assistant importieren](https://my.home-assistant.io/badges/blueprint_import.svg)](https://my.home-assistant.io/redirect/blueprint_import/?blueprint_url=https://github.com/Toxo666/HA_Blueprints/blob/main/Automations/fronius_soc_target/bms_fronius_soc_target.yaml)
+[![Blueprint in Home Assistant importieren](https://my.home-assistant.io/badges/blueprint_import.svg)](https://my.home-assistant.io/redirect/blueprint_import/?blueprint_url=https://github.com/sbstn-0x2a/HA_Blueprints/blob/main/Automations/fronius_soc_target/bms_fronius_soc_target.yaml)
 
 ---
 

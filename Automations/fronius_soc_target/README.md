@@ -6,7 +6,7 @@ A Home Assistant Blueprint for dynamic solar battery charge management — optim
 
 🇩🇪 [Deutsche Version](/Automations/fronius_soc_target/README.de.md)
 
-[![Open your Home Assistant instance and import this Blueprint](https://my.home-assistant.io/badges/blueprint_import.svg)](https://my.home-assistant.io/redirect/blueprint_import/?blueprint_url=https://github.com/Toxo666/HA_Blueprints/blob/main/Automations/fronius_soc_target/bms_fronius_soc_target.yaml)
+[![Open your Home Assistant instance and import this Blueprint](https://my.home-assistant.io/badges/blueprint_import.svg)](https://my.home-assistant.io/redirect/blueprint_import/?blueprint_url=https://github.com/sbstn-0x2a/HA_Blueprints/blob/main/Automations/fronius_soc_target/bms_fronius_soc_target.yaml)
 
 ---
 
