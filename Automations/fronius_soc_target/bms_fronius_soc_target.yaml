@@ -1,5 +1,5 @@
 blueprint:
-  name: Solar Battery SOC Target Control
+  name: Solar Battery SOC Target Control v2 (Merker + geglaettete Netzleistung)
   description: >
     Regelt die Akku-Ladeleistung dynamisch in drei Phasen: Vor dem Peak wird
     der Akku gleichmäßig auf den Ziel-SOC geladen (z.B. 55%), um genug Puffer
@@ -60,6 +60,17 @@ blueprint:
       description: Select-Entität für die Betriebsmodi des BMS.
       selector:
         entity: {}
+
+    last_cmd_helper:
+      name: Merker fuer die zuletzt gesetzte Ladeleistung (input_number)
+      description: >
+        v2: Eigener Speicher des letzten Sollwerts. Ersetzt das Ruecklesen aus
+        der Charge-Limit-Number - die existiert im Modus "Auto" nicht und lieferte
+        ueber float(0) eine 0, was die Rampe zurueckgesetzt hat.
+      selector:
+        entity:
+          filter:
+            domain: input_number
 
     charge_limit_number:
       name: Ladeleistungs-Entität
@@ -290,6 +301,15 @@ trigger:
     entity_id: !input peak_time_sensor
 
 action:
+  # Guard: Beim Reload der Solarprognose (open_meteo_solar_forecast) ist der
+  # Peak-Sensor kurz 'unknown' - as_local(as_datetime(None)) warf dann
+  # AttributeError 'NoneType' has no attribute 'tzinfo' (10x am 30.08.2026)
+  # und der ganze Regelzyklus wurde verworfen. Zyklus still auslassen,
+  # der naechste 5-Minuten-Tick uebernimmt.
+  - variables:
+      guard_peak_sensor: !input peak_time_sensor
+  - condition: template
+    value_template: "{{ as_datetime(states(guard_peak_sensor)) is not none }}"
   - variables:
       # Input-Aliase
       peak_sensor: !input peak_time_sensor
@@ -299,6 +319,7 @@ action:
       grid_sensor: !input grid_power_sensor
       mode_entity: !input control_mode_select
       limit_entity: !input charge_limit_number
+      last_cmd_entity: !input last_cmd_helper
       on_mode: !input option_on_load
       off_mode: !input option_off_load
       battery_kwh: !input battery_capacity_kwh
@@ -337,9 +358,15 @@ action:
       remaining_val: "{{ states[remaining_sensor].state | float(0) }}"
       current_soc: "{{ states[soc_entity].state | float(0) }}"
       grid_power: "{{ states[grid_sensor].state | float(0) }}"
+      # v2: Der zuletzt GESETZTE Wert kommt aus dem Merker, nicht aus der Number.
+      # Die ist im Modus "Auto" unavailable; float(0) hat die Rampe dort reihenweise
+      # auf Null zurueckgeworfen (18.07.2026 dreimal in 40 Minuten).
+      # Fallback auf die Number, solange der Merker noch nie geschrieben wurde.
       current_charge: >
+        {% set mem = states[last_cmd_entity].state | float(-1) %}
         {% set raw = (states[limit_entity].state | float(0) / scale) | round(0) | int %}
-        {{ [raw, max_charge_w | int] | min }}
+        {% set val = (mem | round(0) | int) if mem >= 0 else raw %}
+        {{ [val, max_charge_w | int] | min }}
       ev_connected: >
         {{ (ev1_entity != '' and is_state(ev1_entity, 'on'))
            or (ev2_entity != '' and is_state(ev2_entity, 'on')) }}
@@ -425,6 +452,20 @@ action:
           {{ [current + s, req] | min }}
         {% endif %}
 
+  # v2: Sollwert zuerst im Merker festhalten - unabhaengig davon, ob die Number
+  # gerade existiert. Das ist die eigentliche Korrektur gegen die abbrechende Rampe.
+  - service: input_number.set_value
+    target:
+      entity_id: "{{ last_cmd_entity }}"
+    data:
+      value: "{{ target_w | int }}"
+
+  # Der Select wird IMMER gestellt - er ist stets verfuegbar und ist genau das,
+  # was die Charge-Limit-Number ueberhaupt erst erscheinen laesst: die Number
+  # existiert nur im Modus "PV Charge Limit", nicht in "Auto".
+  # (Ein Guard VOR diesem Aufruf erzeugt eine Verklemmung: Modus Auto -> Number
+  # unavailable -> Guard blockt -> Modus wird nie umgestellt -> Number bleibt weg.
+  # Genau das ist am 2026-08-15 passiert.)
   - service: select.select_option
     target:
       entity_id: "{{ mode_entity }}"
@@ -436,10 +477,33 @@ action:
           {{ off_mode }}
         {% endif %}
 
-  - service: number.set_value
-    target:
-      entity_id: "{{ limit_entity }}"
-    data:
-      value: "{{ target_w | int }}"
+  # Nach dem Moduswechsel braucht der Wechselrichter einen Moment, bis die
+  # Number-Entity auftaucht. Ohne das Warten liefe der Schreibvorgang im selben
+  # Durchlauf ins Leere und griffe erst 5 Minuten spaeter.
+  - wait_template: >
+      {{ states(limit_entity) not in ['unknown', 'unavailable', 'none'] }}
+    timeout: "00:00:20"
+    continue_on_timeout: true
+
+  # Nur schreiben, wenn die Number wirklich da ist. Beim Abschalten (target_w = 0)
+  # wurde gerade auf "Auto" gestellt, die Number verschwindet dadurch - dann gibt
+  # es nichts zu schreiben, und der frueher tausendfache Log-Spam
+  # "Referenced entities ... are missing or not currently available" bleibt aus.
+  - if:
+      - condition: template
+        value_template: >
+          {{ states(limit_entity) not in ['unknown', 'unavailable', 'none'] }}
+    then:
+      - service: number.set_value
+        target:
+          entity_id: "{{ limit_entity }}"
+        data:
+          value: "{{ target_w | int }}"
 
 mode: single
+# Um Mitternacht feuern time_pattern /5 und der peak_time_sensor gleichzeitig
+# (die Solarprognose rechnet den Peak neu). mode: single verwirft den zweiten
+# Lauf - das ist richtig, beide wuerden dasselbe rechnen. Seit dem
+# wait_template (bis 20 s) ist das Ueberlappungsfenster gross genug, dass es
+# auffaellt; silent unterdrueckt nur die Meldung, nicht das Verhalten.
+max_exceeded: silent

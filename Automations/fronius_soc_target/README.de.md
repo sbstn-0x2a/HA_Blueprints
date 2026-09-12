@@ -2,6 +2,8 @@
 
 Ein Home Assistant Blueprint zur dynamischen Solarakku-Ladesteuerung — optimiert für Anlagen mit **Fronius-Wechselrichter**, **BYD Battery Box** und **Open-Meteo Solar Forecast**.
 
+**Aktuelle Version: v2** — behebt zwei im Betrieb gemessene Defekte der v1, siehe [Was v2 ändert](#was-v2-ändert). Benötigt einen zusätzlichen Helfer.
+
 🇬🇧 [English version](/Automations/fronius_soc_target/README.md)
 
 [![Blueprint in Home Assistant importieren](https://my.home-assistant.io/badges/blueprint_import.svg)](https://my.home-assistant.io/redirect/blueprint_import/?blueprint_url=https://github.com/Toxo666/HA_Blueprints/blob/main/Automations/fronius_soc_target/bms_fronius_soc_target.yaml)
@@ -33,12 +35,26 @@ Wenn der Post-Peak-Solarertrag nicht ausreicht, um den Akku von `target_soc` auf
 
 ---
 
+## Was v2 ändert
+
+Die v1 hatte zwei Defekte, die erst im Betrieb auffielen:
+
+**1. Die Rampe fiel auf Null zurück.** Die zuletzt gesetzte Ladeleistung wurde aus der Charge-Limit-`number` des BMS zurückgelesen. Diese Entität existiert nur im Modus `PV Charge Limit` — in `Auto` ist sie `unavailable`, und `float(0)` machte daraus eine harte 0 W. Die Rampe begann wieder bei Null (am 18.07.2026 dreimal innerhalb von 40 Minuten). v2 führt einen eigenen Merker als `input_number` und schreibt den Sollwert dort hinein, **bevor** die Number angefasst wird.
+
+**2. Zufällige Zweigauswahl.** Die Netzleistung wurde als Momentanwert von einem Zähler gelesen, der sekündlich um Kilowatt springt — die Entscheidung „hoch oder runter" war damit fast ein Münzwurf. Der Fix steckt nicht im Blueprint: Gib ihm einen **geglätteten** Netzsensor (5-Minuten-Mittel über die Statistics-Integration) statt des Rohwerts.
+
+Ein dritter Fix fängt ab, dass der Peakzeit-Sensor während eines Reloads der Solarprognose kurz `unknown` ist — `as_datetime(None)` warf einen `AttributeError` und verwarf den kompletten Regelzyklus (10-mal am 30.08.2026). Ein solcher Zyklus wird jetzt still ausgelassen, der nächste Tick übernimmt.
+
+---
+
 ## Voraussetzungen
 
 - **Wechselrichter:** Fronius (mit BMS-Steuerung via Modbus, Integration [`fronius_modbus`](https://github.com/callifo/fronius_modbus) via HACS — empfohlen wird der Fork von [@callifo](https://github.com/callifo), der aktiv gepflegt wird)
 - **Akku:** BYD Battery Box Premium HV (oder kompatibles BMS mit `select`-Modusentität und `number`-Ladeleistungsentität)
 - **Solarprognose:** [Open-Meteo Solar Forecast](https://github.com/flowolf/ha-open-meteo-solar-forecast) via HACS, mit `wh_period`-Attribut und einem *Remaining*-Sensor
 - **Stromzähler:** Beliebiger Energiezähler mit vorzeichenbehafteter Netzleistung (negativ = Einspeisung), z.B. Shelly Pro 3EM
+- **Helfer (erforderlich):** ein `input_number` als Merker für die zuletzt gesetzte Ladeleistung — siehe `package_bms_soc_target.yaml`
+- **Geglätteter Netzsensor (dringend empfohlen):** ein 5-Minuten-Mittel der Netzleistung, angelegt über **Einstellungen → Geräte & Dienste → Helfer → Statistik**. Diesen Sensor als `grid_power_sensor` eintragen, nicht den Rohwert.
 - **E-Auto-Laden (optional):** [evcc](https://evcc.io/) mit [ha-evcc](https://github.com/marq24/ha-evcc) HACS Integration und binären `connected`-Sensoren je Ladepunkt
 ---
 
@@ -54,6 +70,7 @@ Wenn der Post-Peak-Solarertrag nicht ausreicht, um den Akku von `target_soc` auf
 | Netzsensor (`grid_power_sensor`) | Netzleistung in W — negativ = Einspeisung, positiv = Bezug | — |
 | BMS Steuerungsmodus (`control_mode_select`) | Select-Entität für die Betriebsmodi des BMS | — |
 | Ladeleistungs-Entität (`charge_limit_number`) | Number-Entität für die Ladeleistungsvorgabe ans BMS (W) | — |
+| Merker letzter Sollwert (`last_cmd_helper`) | `input_number`, der die zuletzt gesetzte Ladeleistung speichert — v2, verhindert das Zurückfallen der Rampe | — |
 | E-Auto angesteckt (`ev_connected_sensor_1/2`) | Optional: EVCC Binary Sensor je Ladepunkt — Automation ist inaktiv solange ein Auto angesteckt ist | *(keiner)* |
 | Modus bei aktivem Laden (`option_on_load`) | BMS-Betriebsmodus solange die Automation aktiv lädt | `PV Charge Limit` |
 | Modus bei inaktivem Laden (`option_off_load`) | BMS-Betriebsmodus wenn die Automation nicht eingreift | `Auto` |
@@ -75,7 +92,7 @@ Wenn der Post-Peak-Solarertrag nicht ausreicht, um den Akku von `target_soc` auf
 
 ## Regellogik
 
-Alle 5 Minuten (oder bei Änderung des Peak-Sensors) wertet die Automation die aktuelle Netzleistung aus:
+Alle 5 Minuten (oder bei Änderung des Peak-Sensors) wertet die Automation die aktuelle Netzleistung aus. Dabei den **geglätteten** Sensor verwenden — mit Momentanwerten wird der Zweig unten mehr oder weniger zufällig gewählt:
 
 - **Netzbezug (> +100 W):** Ladeleistung um einen Schritt reduzieren → kein Laden aus dem Netz
 - **Einspeisung unter Limit:** Ladeleistung um einen Schritt erhöhen, gedeckelt durch `required_w`

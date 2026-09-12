@@ -2,6 +2,8 @@
 
 A Home Assistant Blueprint for dynamic solar battery charge management — optimized for systems with a **Fronius inverter**, **BYD Battery Box**, and **Open-Meteo solar forecast**.
 
+**Current version: v2** — two field-measured defects of v1 are fixed, see [What v2 changes](#what-v2-changes). It needs one additional helper.
+
 🇩🇪 [Deutsche Version](/Automations/fronius_soc_target/README.de.md)
 
 [![Open your Home Assistant instance and import this Blueprint](https://my.home-assistant.io/badges/blueprint_import.svg)](https://my.home-assistant.io/redirect/blueprint_import/?blueprint_url=https://github.com/Toxo666/HA_Blueprints/blob/main/Automations/fronius_soc_target/bms_fronius_soc_target.yaml)
@@ -33,12 +35,26 @@ If post-peak solar yield is not sufficient to charge the battery from `target_so
 
 ---
 
+## What v2 changes
+
+v1 had two defects that only showed up in operation:
+
+**1. The ramp collapsed to zero.** The last commanded charge power was read back from the BMS charge limit `number`. That entity only exists in `PV Charge Limit` mode — in `Auto` it is `unavailable`, and `float(0)` turned it into a hard 0 W. The ramp restarted from scratch (observed three times within 40 minutes on 2026-07-18). v2 keeps its own memory in an `input_number` and writes the setpoint there **before** touching the number.
+
+**2. Random branch selection.** The grid power was read as an instantaneous value from a meter that swings by kilowatts from second to second, so the up/down decision was close to a coin flip. The fix is not in the blueprint: feed it a **smoothed** grid sensor (a 5-minute mean via the Statistics integration) instead of the raw one.
+
+A third fix guards against the peak time sensor being `unknown` while the solar forecast reloads — `as_datetime(None)` raised an `AttributeError` and discarded the whole control cycle (10 times on 2026-08-30). Such a cycle is now skipped silently; the next tick takes over.
+
+---
+
 ## Requirements
 
 - **Inverter:** Fronius (with BMS control via Modbus via [`fronius_modbus`](https://github.com/callifo/fronius_modbus) HACS integration — use the [@callifo](https://github.com/callifo) fork, it is actively maintained)
 - **Battery:** BYD Battery Box Premium HV (or compatible BMS with `select` mode control and `number` charge limit entity)
 - **Solar Forecast:** [Open-Meteo Solar Forecast](https://github.com/flowolf/ha-open-meteo-solar-forecast) HACS integration with `wh_period` attribute and a *remaining* sensor
 - **Grid Meter:** Any energy meter with signed grid power (negative = feed-in), e.g. Shelly Pro 3EM
+- **Helper (required):** one `input_number` as the memory for the last commanded charge power — see `package_bms_soc_target.yaml`
+- **Smoothed grid sensor (strongly recommended):** a 5-minute mean of the grid power, created via **Settings → Devices & Services → Helpers → Statistics**. Pass that sensor as `grid_power_sensor` instead of the raw meter.
 - **EV Charging (optional):** [evcc](https://evcc.io/) with [ha-evcc](https://github.com/marq24/ha-evcc) HACS integration with binary `connected` sensors per charger
 
 ---
@@ -55,6 +71,7 @@ If post-peak solar yield is not sufficient to charge the battery from `target_so
 | Grid power sensor (`grid_power_sensor`) | Grid power in W — negative = feed-in, positive = draw | — |
 | BMS control mode (`control_mode_select`) | Select entity for BMS operating modes | — |
 | Charge limit entity (`charge_limit_number`) | Number entity for BMS charge power setpoint (W) | — |
+| Last command memory (`last_cmd_helper`) | `input_number` storing the last commanded charge power — v2, prevents the ramp from resetting | — |
 | EV connected sensor (`ev_connected_sensor_1/2`) | Optional: EVCC binary sensor per charger — automation is inactive while an EV is connected | *(none)* |
 | Mode when charging (`option_on_load`) | BMS mode while the automation is actively controlling charge | `PV Charge Limit` |
 | Mode when inactive (`option_off_load`) | BMS mode when the automation is not intervening | `Auto` |
@@ -76,7 +93,7 @@ If post-peak solar yield is not sufficient to charge the battery from `target_so
 
 ## How the charge power is regulated
 
-Every 5 minutes (or on peak sensor change), the automation evaluates the current grid power:
+Every 5 minutes (or on peak sensor change), the automation evaluates the current grid power. Feed it the **smoothed** sensor — with raw instantaneous values the branch below is chosen more or less at random:
 
 - **Grid draw (> +100 W):** Reduce charge power by one step → protect against grid draw
 - **Feed-in below limit:** Ramp up by one step, capped at `required_w`

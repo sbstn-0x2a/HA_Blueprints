@@ -1,0 +1,23 @@
+# Helfer für "Solar Battery SOC Target Control v2".
+# Behebt die zwei gemessenen Defekte der v1:
+#   1) Rücklesen der Ladeleistung aus einer zeitweise "unavailable" Number
+#      -> float(0) setzte die Rampe zurück. Ersatz: eigener Merker.
+#   2) Netzleistung als Momentanwert aus einem Sensor, der sekündlich um
+#      Kilowatt springt -> zufällige Zweigauswahl. Ersatz: 5-Minuten-Mittel.
+# Angelegt 28.08.2026. Entfernen = diese Datei löschen + reload.
+
+input_number:
+  bms_v2_last_cmd:
+    name: BMS v2 – zuletzt gesetzte Ladeleistung
+    min: 0
+    max: 20000
+    step: 1
+    unit_of_measurement: W
+    mode: box
+    icon: mdi:battery-charging-medium
+
+# Der 5-Minuten-Mittelwert der Netzleistung wurde als Config-Entry-Helfer angelegt
+# (Statistics-Integration), nicht hier als YAML-Plattform - eine YAML-Plattform
+# haette einen HA-Neustart gebraucht. Entitaet:
+#   sensor.netzleistung_geglaettet_5_min
+# Anlegen/Entfernen ueber Einstellungen -> Geraete & Dienste -> Helfer.
