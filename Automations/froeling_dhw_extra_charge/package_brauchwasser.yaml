@@ -1,0 +1,276 @@
+# Brauchwasser: Anzeige-Helfer der Steuerung + Erfassung tatsächlicher Ladungen.
+#
+# Aufgabenteilung seit 12.09.2026 (Blueprint v0.9):
+#   input_datetime.letzter_brauchwasser_befehl  <- schreibt die BLUEPRINT, wenn sie
+#       Extraladen kommandiert. Steuert allein die Sperrzeit (min_charge_interval).
+#   input_datetime.letzte_brauchwasser_ladung   <- schreibt die Automation unten,
+#       und zwar nur bei echtem Temperaturanstieg im Boiler. Egal ob Automation,
+#       Handauslösung am Kessel/in HA oder Pufferladung die Ursache war.
+#
+# Anlass: Am 06.09.2026 setzte die Blueprint um 02:00 den Zeitstempel, die Ladung
+# brach aber zweimal mit STÖRUNG ab (Boiler kam nur auf 46 bzw. 50 °C). Die volle
+# Pufferladung am 07.09. (54 -> 78 °C) blieb dagegen unsichtbar, weil sie ohne
+# Extraladen-Befehl lief.
+
+input_text:
+  brauchwasser_vorhersage_status:
+    name: Brauchwasser Vorhersage-Status
+    max: 255
+    icon: mdi:water-thermometer
+  brauchwasser_warte_grund:
+    name: Brauchwasser Warte-Grund
+    max: 255
+    icon: mdi:help-circle-outline
+  # Wer hat den laufenden Kesselstart ausgelöst? Wird bei jedem Wechsel des
+  # Kesselzustands nach "Vorbereitung" neu bestimmt (siehe Automation unten).
+  # Siehe Hinweis bei input_datetime: in der Ursprungsinstallation ein UI-Helfer.
+  grund_brauchwasser_ladung:
+    name: Grund der Brauchwasser-Ladung
+    max: 255
+    icon: mdi:information-outline
+  brauchwasser_startquelle:
+    name: Brauchwasser Startquelle
+    max: 60
+    icon: mdi:account-question
+
+input_datetime:
+  # ---------------------------------------------------------------------------
+  # HINWEIS fuer den Nachbau / NOTE for reuse:
+  # letzte_brauchwasser_ladung und grund_brauchwasser_ladung existierten in der
+  # Ursprungsinstallation als UI-Helfer (Einstellungen > Geraete & Dienste >
+  # Helfer) und standen deshalb nicht in diesem Package. Fuer eine lauffaehige
+  # Installation sind sie hier ergaenzt.
+  # Wenn du diese beiden bereits als UI-Helfer angelegt hast: entweder die
+  # UI-Helfer loeschen ODER die beiden Eintraege hier auskommentieren - sonst
+  # kollidieren die Entity-IDs.
+  #
+  # If you already created these two as UI helpers, delete them there or comment
+  # out the entries here - otherwise the entity IDs collide.
+  # ---------------------------------------------------------------------------
+  letzte_brauchwasser_ladung:
+    name: Letzte Brauchwasser-Ladung
+    has_date: true
+    has_time: true
+    icon: mdi:history
+  naechste_brauchwasser_ladung:
+    name: Nächste Brauchwasser-Ladung
+    has_date: true
+    has_time: true
+    icon: mdi:clock-start
+  letzter_brauchwasser_befehl:
+    name: Letzter Brauchwasser-Befehl
+    has_date: true
+    has_time: true
+    icon: mdi:send-clock
+
+input_boolean:
+  brauchwasser_ladung_laeuft:
+    name: Brauchwasser lädt gerade
+    icon: mdi:fire
+  # Von der Blueprint gesetzt, wenn sie Extraladen kommandiert; zurückgesetzt,
+  # sobald der Kessel den Modus wieder auf Auto stellt. Nur daran erkennt die
+  # Erfassung zuverlässig, ob eine Erwärmung von der Automation stammt — über
+  # die Zeit geht es nicht: am 06.09. lag zwischen Befehl (02:00) und erstem
+  # Temperaturanstieg am Fühler oben mehr als eine Stunde.
+  brauchwasser_befehl_offen:
+    name: Brauchwasser-Befehl offen
+    icon: mdi:send-clock
+
+input_number:
+  # Niedrigster Messwert seit der letzten Ladung. Bezugspunkt für die Erkennung;
+  # zieht beim Abkühlen mit nach unten und während einer Ladung nach oben.
+  brauchwasser_tiefpunkt:
+    name: Brauchwasser Tiefpunkt (intern)
+    min: 0
+    max: 110
+    step: 0.1
+    unit_of_measurement: "°C"
+    mode: box
+    icon: mdi:arrow-collapse-down
+  brauchwasser_ladung_startwert:
+    name: Brauchwasser Startwert der laufenden Ladung (intern)
+    min: 0
+    max: 110
+    step: 0.1
+    unit_of_measurement: "°C"
+    mode: box
+    icon: mdi:thermometer-low
+
+automation:
+  - id: brauchwasser_ladung_erfassen
+    alias: Brauchwasser – Ladung erfassen
+    description: >-
+      Erkennt jede tatsächliche Erwärmung des Brauchwassers am Temperaturanstieg
+      (Schwelle 4 K über dem Tiefpunkt) und schreibt Zeitpunkt, Quelle und Ergebnis.
+      Unabhängig davon, ob die Automation, eine Handauslösung oder eine Pufferladung
+      die Ursache war. Ein abgesetzter Befehl allein zählt NICHT als Ladung.
+    mode: queued
+    max: 10
+    triggers:
+      - trigger: state
+        entity_id: sensor.boiler_1_temperatur_oben
+        id: wert
+      # Während einer Ladung ändert sich der Messwert alle 1–3 Minuten, beim
+      # Abkühlen nur etwa alle 4 Stunden. 30 Minuten Ruhe = Ladung vorbei.
+      - trigger: state
+        entity_id: sensor.boiler_1_temperatur_oben
+        for: "00:30:00"
+        id: ruhe
+      # Kessel stellt den Modus zurück -> der Auftrag der Automation ist erledigt
+      - trigger: state
+        entity_id: select.12345_boiler_01_mode
+        to: "Auto"
+        id: befehl_ende
+      # Jeder Brennerstart. "Vorbereitung" ist der eindeutige Startzustand:
+      # seit 13.08.2026 hatte jedes "Anheizen" genau diesen Vorgänger (18/18).
+      - trigger: state
+        entity_id: sensor.12345_kessel_state
+        to: "Vorbereitung"
+        id: kesselstart
+    conditions:
+      - condition: template
+        value_template: >-
+          {{ states('sensor.boiler_1_temperatur_oben')
+             not in ['unknown', 'unavailable', 'none', '', None] }}
+    actions:
+      - variables:
+          _temp: "{{ states('sensor.boiler_1_temperatur_oben') | float(0) }}"
+          _tief: "{{ states('input_number.brauchwasser_tiefpunkt') | float(0) }}"
+          _start: "{{ states('input_number.brauchwasser_ladung_startwert') | float(0) }}"
+          _laeuft: "{{ is_state('input_boolean.brauchwasser_ladung_laeuft', 'on') }}"
+          # Echte Messwertänderung? (ein state-Trigger feuert auch bei Attributen)
+          _neuer_wert: >-
+            {{ trigger.id == 'wert'
+               and trigger.from_state is not none
+               and trigger.to_state.state != trigger.from_state.state }}
+          _schwelle: 4
+          # Auslöser DIESES Brennerstarts. Entscheidend ist der zeitliche Abstand
+          # zum Befehl: die Automation löst den Kessel binnen 82-127 s aus (8 von 8
+          # Ladungen seit 13.08.2026). Startet der Kessel später erneut, obwohl der
+          # Extraladen-Auftrag noch offen ist, arbeitet er ihn selbst ab - die
+          # Automation kann es wegen min_charge_interval gar nicht gewesen sein
+          # (06.09.: zweiter Start um 07:59:31, Sperrzeit lief bis 08:00:00).
+          # Betriebsart der Anlage. Hartes Kriterium: nur in "Brauchwasser" bedient
+          # der Kessel ausschließlich den Speicher. In "Automatik" läuft er für die
+          # Heizkreise (der Boiler wird dabei nur mitgenommen), in "Kaminkehrer" oder
+          # "Ausgeschaltet" ist der Start gar keine Brauchwasser-Anforderung.
+          _anlage: >-
+            {% set a = states('sensor.anlagenzustand') %}
+            {{ a if a not in ['unknown', 'unavailable', 'none', ''] else 'unbekannt' }}
+          _startquelle: >-
+            {% set b = states('input_datetime.letzter_brauchwasser_befehl') %}
+            {% set frisch = b not in ['', 'unknown', 'unavailable']
+                 and 0 <= (now() - as_local(as_datetime(b))).total_seconds() <= 300 %}
+            {% if frisch %}
+            Automation
+            {%- elif is_state('input_boolean.brauchwasser_befehl_offen', 'on') %}
+            Kessel-Wiederanlauf
+            {%- elif is_state('select.12345_boiler_01_mode', 'Extraladen') %}
+            Extraladung von Hand
+            {%- elif _anlage in ['Brauchwasser', 'unbekannt'] %}
+            Kessel-/Pufferladung
+            {%- elif _anlage == 'Automatik' %}
+            Heizbetrieb (Anlage auf Automatik)
+            {%- else %}
+            Fremdstart (Anlage: {{ _anlage }})
+            {%- endif %}
+          _quelle: >-
+            {% set q = states('input_text.brauchwasser_startquelle') %}
+            {{ q if q not in ['', 'unknown', 'unavailable'] else 'unbekannt' }}
+      - choose:
+          # --- Brennerstart: Auslöser festhalten ---
+          - conditions:
+              - "{{ trigger.id == 'kesselstart' }}"
+            sequence:
+              - action: input_text.set_value
+                target:
+                  entity_id: input_text.brauchwasser_startquelle
+                data:
+                  value: "{{ _startquelle | trim }}"
+              - action: logbook.log
+                data:
+                  name: "Brauchwasser Ladung"
+                  message: "Kesselstart, Auslöser: {{ _startquelle | trim }}"
+
+          # --- Auftrag der Automation beendet ---
+          - conditions:
+              - "{{ trigger.id == 'befehl_ende' }}"
+            sequence:
+              - action: input_boolean.turn_off
+                target:
+                  entity_id: input_boolean.brauchwasser_befehl_offen
+
+          # --- Ladung vorbei: Ergebnis festhalten ---
+          - conditions:
+              - "{{ trigger.id == 'ruhe' and _laeuft }}"
+            sequence:
+              - action: input_boolean.turn_off
+                target:
+                  entity_id: input_boolean.brauchwasser_ladung_laeuft
+              - action: input_text.set_value
+                target:
+                  entity_id: input_text.grund_brauchwasser_ladung
+                data:
+                  value: >-
+                    {{ states('input_text.grund_brauchwasser_ladung').split(' · ')[0] }}
+                    · {{ _start | round | int }}→{{ _temp | round | int }} °C
+              - action: logbook.log
+                data:
+                  name: "Brauchwasser Ladung"
+                  message: >-
+                    Beendet: {{ _start | round | int }} → {{ _temp | round | int }} °C
+                    ({{ states('input_text.grund_brauchwasser_ladung').split(' · ')[0] }})
+              - action: input_number.set_value
+                target:
+                  entity_id: input_number.brauchwasser_tiefpunkt
+                data:
+                  value: "{{ _temp }}"
+
+          # --- Neuer Tiefpunkt (Abkühlen) bzw. Erstinitialisierung ---
+          - conditions:
+              - "{{ _neuer_wert and (_temp < _tief or _tief <= 0) }}"
+            sequence:
+              - action: input_number.set_value
+                target:
+                  entity_id: input_number.brauchwasser_tiefpunkt
+                data:
+                  value: "{{ _temp }}"
+
+          # --- Anstieg über die Schwelle: Ladung läuft ---
+          - conditions:
+              - "{{ _neuer_wert and (_temp - _tief) >= _schwelle }}"
+            sequence:
+              - if:
+                  - condition: template
+                    value_template: "{{ not _laeuft }}"
+                then:
+                  - action: input_boolean.turn_on
+                    target:
+                      entity_id: input_boolean.brauchwasser_ladung_laeuft
+                  - action: input_number.set_value
+                    target:
+                      entity_id: input_number.brauchwasser_ladung_startwert
+                    data:
+                      value: "{{ _tief }}"
+                  - action: input_datetime.set_datetime
+                    target:
+                      entity_id: input_datetime.letzte_brauchwasser_ladung
+                    data:
+                      datetime: "{{ now().isoformat() }}"
+                  - action: input_text.set_value
+                    target:
+                      entity_id: input_text.grund_brauchwasser_ladung
+                    data:
+                      value: "{{ _quelle | trim }}"
+                  - action: logbook.log
+                    data:
+                      name: "Brauchwasser Ladung"
+                      message: >-
+                        Erkannt ab {{ _tief | round | int }} °C, Quelle:
+                        {{ _quelle | trim }}
+              # Bezugspunkt mitziehen, damit nicht bei jedem Grad neu ausgelöst wird
+              - action: input_number.set_value
+                target:
+                  entity_id: input_number.brauchwasser_tiefpunkt
+                data:
+                  value: "{{ _temp }}"

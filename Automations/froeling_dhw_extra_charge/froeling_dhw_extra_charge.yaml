@@ -1,0 +1,495 @@
+# Version 0.9 (2026-09-12)
+# - Entity-Picker statt Textfeld fuer weather_forecast_entity, plant_state_sensor,
+#   status_sensor, next_charge_sensor, reason_sensor (mit Domain-Filter). Vorher waren
+#   alle optionalen Inputs Textfelder - ein Tippfehler haette die jeweilige Funktion
+#   lautlos abgeschaltet. default: "" bleibt zulaessig (Muster laeuft im selben System
+#   in blueprints/automation/solar/bms_fronius_soc_target.yaml, HA 2026.9.1).
+#   Die drei Anzeige-Bloecke pruefen jetzt auf ['', None], weil ein im UI geleerter
+#   Picker None liefert.
+# - HARTE SPERRE ueber den Anlagenzustand (neue Inputs plant_state_sensor und
+#   plant_state_allowed, Default "Brauchwasser"). Nur in diesem Zustand bedient der
+#   Kessel ausschliesslich den Speicher; in "Automatik" laeuft er fuer die Heizkreise,
+#   in "Kaminkehrer"/"Ausgeschaltet" verpufft ein Extraladen-Befehl wirkungslos,
+#   waehrend die Sperrzeit trotzdem 6 h laeuft. Gilt auch fuer den Notfall-Boden.
+#   ACHTUNG Winterbetrieb: Ab Umschaltung auf "Automatik" (Okt-Apr) laedt die
+#   Automation dann NICHT mehr - dafuer "Brauchwasser, Automatik" eintragen.
+# - TRENNUNG von Befehl und Ladung. Der Lade-Zweig schreibt nicht mehr
+#   input_datetime.letzte_brauchwasser_ladung, sondern den neuen Helfer
+#   input_datetime.letzter_brauchwasser_befehl. Dieser steuert allein die
+#   Sperrzeit (min_charge_interval).
+# - input_datetime.letzte_brauchwasser_ladung wird ab jetzt ausschliesslich von
+#   der Automation "Brauchwasserladung erfassen" (packages/brauchwasser.yaml)
+#   gesetzt, und zwar nur bei tatsaechlichem Temperaturanstieg im Boiler -
+#   egal ob Automation, Handausloesung oder Pufferladung die Ursache war.
+#   Grund: Bis v0.8 galt eine Ladung als erfolgt, sobald der Befehl abgesetzt
+#   war. Am 06.09.2026 brach die Ladung zweimal mit STOERUNG ab, die Kachel
+#   meldete trotzdem Erfolg; die volle Pufferladung am 07.09. blieb unsichtbar.
+# - input_text.grund_brauchwasser_ladung schreibt ebenfalls die Erfassung
+#   (mit Quelle und erreichter Temperatur), nicht mehr die Blueprint.
+# - Logbuchzaehler heisst jetzt MinutenSeitLetztemBefehl (vorher
+#   MinutenSeitLetzter), weil er genau das misst.
+# - Sonst unveraendert gegenueber v0.8.
+#
+# Version 0.8 (2026-06-23)
+# GROSSE Umstellung: Comfort-first Nacht-Laden statt Solar-Fenster.
+# - RAUS: solar_power_sensor, min_solar_power, optimal_solar_power, solar_start_time,
+#   solar_end_time, heat_loss_per_hour_fixed, prediction_hours.
+#   (Solar war nur Strom-Bonus; mit >20 kWh Hausakku irrelevant. Stromverbrauch der
+#    Heizung – Zünd-Heizstab, Lüfter, Pumpen – wird jetzt einfach vom Akku gedeckt.)
+# - NEU: Nacht-Hauptladung. Geladen wird, wenn die Vorhersage für den nächsten Morgen
+#   ODER Abend unter min_temperature fällt. Der ZEITPUNKT in der Nacht wird auf den
+#   kältesten DWD-Stundenwert gelegt (geringstes Kondensat-Risiko im Schornstein),
+#   aber so, dass die Ladung rechtzeitig vor morning_ready fertig ist.
+# - NEU: weather_forecast_entity (DWD, stündlich) – Timing-Optimierer, KEIN Lade-Gate.
+#   Die Außentemperatur entscheidet NICHT ob, sondern nur WANN in der Nacht geladen wird.
+# - NEU: charge_duration_hours (Vorlauf, default 2.5 h bis 70 °C) und night_charge_earliest.
+# - Abkühlmodell jetzt EXPONENTIELL (Newton): T(t) = T_raum + (T0 - T_raum)·e^(-k·t),
+#   k = heat_loss_coefficient. Ersetzt die lineare Extrapolation, die über den langen
+#   Nacht→Abend-Horizont (~16-20 h) die Abkühlung stark überschätzt hätte (→ Überladen).
+# - Notfall-Boden bleibt bei min_temperature - 3 (seltenes Tag-Sicherheitsnetz).
+# - Dashboard (status/next_charge/reason) erhalten, an die neue Logik angepasst.
+#
+# Offen für v0.9: Wasserverbrauch als additiver Korrekturterm für _hours_until_min_temp /
+#   _next_charge_time (Entnahme ist der eigentliche Grund für kaltes Wasser, nicht Standverlust).
+#
+# Version 0.7 (2026-06-21)
+# - next_charge_sensor (input_datetime), reason_sensor (input_text), Status unverändert ggü. v0.6.
+# Version 0.6 (2026-06-15)
+# - min_charge_interval für ALLE Pfade, prediction_hours verdrahtet, _water_valid.
+# Version 0.5 (2026-06-13)
+# - status_sensor, top-level condition entfernt, zentraler variables-Step.
+
+blueprint:
+  name: Intelligente Brauchwasser-Steuerung via Fröling Extraladen v0.9
+  description: >
+    Comfort-first Brauchwasser-Steuerung für einen Fröling-Pelletkessel via Extraladen.
+    Lädt bevorzugt nachts (kältester DWD-Stundenwert = geringstes Kondensat-Risiko),
+    wenn die exponentielle Temperaturvorhersage für den nächsten Morgen oder Abend die
+    Mindesttemperatur unterschreitet. Notfall-Boden schützt jederzeit. Solar entfernt.
+  domain: automation
+  input:
+    water_temperature_sensor:
+      name: Brauchwasser-Temperatursensor
+      selector:
+        entity:
+          domain: sensor
+          device_class: temperature
+    outdoor_temperature_sensor:
+      name: Umgebungstemperatursensor (Puffer/Heizungsraum)
+      description: Umgebungstemperatur des Puffers. Nur für das Abkühlmodell (Standverlust), kein Steuer-Gate.
+      selector:
+        entity:
+          domain: sensor
+          device_class: temperature
+    weather_forecast_entity:
+      name: Wettervorhersage-Entität (optional, DWD stündlich)
+      description: >
+        weather-Entität mit stündlicher Vorhersage (z.B. weather.forecast_home).
+        Wird per weather.get_forecasts abgefragt, um den kältesten Nacht-Stundenwert als
+        Ladezeitpunkt zu wählen. Leer lassen → Ladung am spätestmöglichen Punkt (morning_ready − Ladedauer).
+      default: ""
+      selector:
+        entity:
+          domain: weather
+    extra_charge_service:
+      name: Fröling Extraladen Service/Entity
+      description: Entität mit der das Laden ausgelöst wird. Knopf/Schalter/Heizung/Auswahlmenü
+      selector:
+        entity:
+          domain:
+            - button
+            - switch
+            - water_heater
+            - select
+    extra_charge_select_option:
+      name: Extraladen-Option
+      description: Wenn Auswahlmenü, welche Option soll gewählt werden
+      default: "Extraladen"
+      selector:
+        text:
+    min_temperature:
+      name: Mindesttemperatur
+      description: Mindesttemperatur des Brauchwassers zum Morgen oder Abend
+      default: 45
+      selector:
+        number:
+          min: 30
+          max: 70
+          unit_of_measurement: "°C"
+    morning_ready_time:
+      name: Morgens bereit um
+      description: Wann soll Morgens das Wasser die richtige Temperatur haben
+      default: "05:00:00"
+      selector:
+        time:
+    evening_ready_time:
+      name: Abends bereit um
+      description: Wann soll Abends das Wasser die richtige Temperatur haben
+      default: "18:00:00"
+      selector:
+        time:
+    night_charge_earliest:
+      name: Nacht-Ladefenster frühester Start
+      description: >
+        Ab dieser (Abend-)Uhrzeit darf die Nachtladung frühestens beginnen. Zusammen mit
+        morning_ready und der Ladedauer ergibt sich das Suchfenster für den kältesten Slot.
+      default: "22:00:00"
+      selector:
+        time:
+    charge_duration_hours:
+      name: Ladedauer (Vorlauf)
+      description: >
+        Wie lange der Kessel braucht, um das Brauchwasser auf Zieltemperatur zu bringen.
+        Bestimmt den spätesten Startzeitpunkt (morning_ready − Ladedauer).
+      default: 2.5
+      selector:
+        number:
+          min: 0.5
+          max: 6
+          step: 0.25
+          unit_of_measurement: "h"
+    min_charge_interval:
+      name: Mindest-Extraladen-Abstand
+      description: Welcher zeitliche Abstand soll mindestens eingehalten werden
+      default: 360
+      selector:
+        number:
+          min: 60
+          max: 720
+          unit_of_measurement: "min"
+    prediction_activation_threshold:
+      name: Vorhersage nur aktiv unter Temperatur
+      description: Ab welcher Wassertemperatur die Vorhersage/Nachtladung aktiv wird
+      default: 52
+      selector:
+        number:
+          min: 40
+          max: 65
+          unit_of_measurement: "°C"
+    heat_loss_coefficient:
+      name: Wärmeverlust-Koeffizient (k)
+      description: >
+        Abkühlrate k im Newton-Modell T(t) = T_raum + (T0 − T_raum)·e^(−k·t).
+        Default 0.011 1/h empirisch ermittelt (entspricht ~0.59 °C/h bei ΔT 54 K).
+      default: 0.011
+      selector:
+        number:
+          min: 0.005
+          max: 0.05
+          step: 0.001
+          unit_of_measurement: "1/h"
+          mode: box
+    plant_state_sensor:
+      name: Anlagenzustand-Sensor (optional)
+      description: >
+        Entity-ID des Anlagenzustands (z.B. sensor.anlagenzustand). Ist er gesetzt, laedt die
+        Automation NUR, wenn sein Wert in plant_state_allowed steht - Notfall-Boden
+        eingeschlossen. Leer lassen schaltet die Sperre ab.
+      default: ""
+      selector:
+        entity:
+          domain: sensor
+    plant_state_allowed:
+      name: Erlaubte Anlagenzustaende
+      description: >
+        Kommaliste der Zustaende, in denen geladen werden darf. Default "Brauchwasser":
+        nur dann bedient der Kessel ausschliesslich den Speicher. Im Winterbetrieb steht die
+        Anlage auf "Automatik" - soll die Automation dann weiterlaufen, hier
+        "Brauchwasser, Automatik" eintragen.
+      default: "Brauchwasser"
+      selector:
+        text:
+    status_sensor:
+      name: Status-Sensor Entity ID (optional)
+      description: input_text-Entität (max 255) für den Status-Einzeiler. Leer = aus.
+      default: ""
+      selector:
+        entity:
+          domain: input_text
+    next_charge_sensor:
+      name: Nächste-Ladung-Sensor Entity ID (optional)
+      description: input_datetime-Entität (Datum+Zeit) für den nächsten Ladezeitpunkt. Leer = aus.
+      default: ""
+      selector:
+        entity:
+          domain: input_datetime
+    reason_sensor:
+      name: Warte-Grund-Sensor Entity ID (optional)
+      description: input_text-Entität (max 255) für den Klartext-Grund. Leer = aus.
+      default: ""
+      selector:
+        entity:
+          domain: input_text
+
+variables:
+  water_temperature_sensor: !input water_temperature_sensor
+  outdoor_temperature_sensor: !input outdoor_temperature_sensor
+  weather_forecast_entity: !input weather_forecast_entity
+  extra_charge_service: !input extra_charge_service
+  extra_charge_select_option: !input extra_charge_select_option
+  min_temperature: !input min_temperature
+  morning_ready_time: !input morning_ready_time
+  evening_ready_time: !input evening_ready_time
+  night_charge_earliest: !input night_charge_earliest
+  charge_duration_hours: !input charge_duration_hours
+  min_charge_interval: !input min_charge_interval
+  prediction_activation_threshold: !input prediction_activation_threshold
+  heat_loss_coefficient: !input heat_loss_coefficient
+  plant_state_sensor: !input plant_state_sensor
+  plant_state_allowed: !input plant_state_allowed
+  status_sensor: !input status_sensor
+  next_charge_sensor: !input next_charge_sensor
+  reason_sensor: !input reason_sensor
+
+trigger:
+  - platform: time_pattern
+    minutes: "/10"
+
+action:
+  # --- Basiswerte + exponentielle Vorhersage ---
+  - variables:
+      _water_raw: "{{ states(water_temperature_sensor) }}"
+      _water_temp: "{{ states(water_temperature_sensor) | float(0) }}"
+      _water_valid: "{{ states(water_temperature_sensor) not in ['unknown','unavailable','none','',None] and (states(water_temperature_sensor) | float(0)) > 5 }}"
+      _room_raw: "{{ states(outdoor_temperature_sensor) }}"
+      _room_temp: >
+        {% set r = states(outdoor_temperature_sensor) %}
+        {{ (r | float(21)) if r not in ['unknown','unavailable','none','',None] else 21 }}
+      _k: "{{ [heat_loss_coefficient | float(0.011), 0.001] | max }}"
+      # Momentane Abkühlrate (k·ΔT) nur für die Status-Anzeige (°C/h), wie in v0.7.
+      _heat_loss_now: "{{ ((_k | float) * (_water_temp | float - _room_temp | float)) | round(2) }}"
+
+      _hours_until_morning: >
+        {% set mt = now().replace(hour=morning_ready_time.split(':')[0]|int, minute=morning_ready_time.split(':')[1]|int, second=0, microsecond=0) %}
+        {% if mt <= now() %}{{ ((mt + timedelta(days=1)) - now()).total_seconds() / 3600 }}
+        {% else %}{{ (mt - now()).total_seconds() / 3600 }}{% endif %}
+      _hours_until_evening: >
+        {% set et = now().replace(hour=evening_ready_time.split(':')[0]|int, minute=evening_ready_time.split(':')[1]|int, second=0, microsecond=0) %}
+        {% if et <= now() %}{{ ((et + timedelta(days=1)) - now()).total_seconds() / 3600 }}
+        {% else %}{{ (et - now()).total_seconds() / 3600 }}{% endif %}
+
+      # Newton-Abkühlung: T(t) = T_raum + (T0 - T_raum)·e^(-k·t)
+      _predicted_morning_temp: >
+        {% set h = _hours_until_morning | float %}
+        {{ (_room_temp | float + (_water_temp | float - _room_temp | float) * (e ** ((-1) * _k | float * h))) | round(2) }}
+      _predicted_evening_temp: >
+        {% set h = _hours_until_evening | float %}
+        {{ (_room_temp | float + (_water_temp | float - _room_temp | float) * (e ** ((-1) * _k | float * h))) | round(2) }}
+
+      # Stunden bis das Wasser min_temp erreicht (exp. invertiert): t = ln((T0-Traum)/(min-Traum)) / k
+      _hours_until_min_temp: >
+        {% set t0 = _water_temp | float %}
+        {% set tr = _room_temp | float %}
+        {% set k = _k | float %}
+        {% set mn = min_temperature | float %}
+        {% if t0 <= mn %}0
+        {% elif mn <= tr or k <= 0 %}999
+        {% else %}{{ (log((t0 - tr) / (mn - tr)) / k) | round(1) }}{% endif %}
+
+      # Betriebsart der Anlage. Harte Sperre: nur in den erlaubten Zustaenden laden.
+      _plant_state: >-
+        {{ '-' if plant_state_sensor in ['', None] else states(plant_state_sensor) }}
+      _plant_ok: >-
+        {{ plant_state_sensor in ['', None]
+           or states(plant_state_sensor) in
+              (plant_state_allowed | string).split(',') | map('trim') | list }}
+
+      _minutes_since_last: >
+        {% set last = states('input_datetime.letzter_brauchwasser_befehl') %}
+        {% if last in ['','unknown','unavailable'] %}99999
+        {% else %}{{ ((now() - as_local(as_datetime(last))).total_seconds() / 60) | int }}{% endif %}
+      _charge_interval_ok: "{{ _minutes_since_last | int >= min_charge_interval | int }}"
+
+      # Notfall-Boden: echtes Sicherheitsnetz, jederzeit (auch tags), aber selten.
+      _should_charge_emergency: "{{ _water_temp | float <= (min_temperature | float - 3) and _charge_interval_ok }}"
+
+      # OB überhaupt eine (Nacht-)Ladung nötig ist: Vorhersage Morgen ODER Abend < min.
+      _night_charge_needed: "{{ _water_valid and _water_temp | float < prediction_activation_threshold | float and ((_predicted_morning_temp | float < min_temperature | float) or (_predicted_evening_temp | float < min_temperature | float)) }}"
+
+  # --- DWD-Stundenvorhersage holen (nur wenn Entität gesetzt & verfügbar) ---
+  - if: "{{ weather_forecast_entity not in ['', None] and states(weather_forecast_entity) not in ['unknown','unavailable','',None] }}"
+    then:
+      - service: weather.get_forecasts
+        target:
+          entity_id: "{{ weather_forecast_entity }}"
+        data:
+          type: hourly
+        response_variable: _wf
+
+  # --- Nacht-Slot (kältester Stundenwert im Fenster) + finale Ladeentscheidung ---
+  - variables:
+      _hourly_fc: >
+        {{ _wf[weather_forecast_entity].forecast if (_wf is defined and weather_forecast_entity in (_wf | default({}))) else [] }}
+
+      # Plan-String: "slot_iso|slot_temp|window_end_iso"
+      _night_plan: >
+        {% set cd = charge_duration_hours | float %}
+        {% set m_h = morning_ready_time.split(':')[0]|int %}
+        {% set m_m = morning_ready_time.split(':')[1]|int %}
+        {% set morn = now().replace(hour=m_h, minute=m_m, second=0, microsecond=0) %}
+        {% set morn = (morn + timedelta(days=1)) if morn <= now() else morn %}
+        {% set window_end = morn - timedelta(hours=cd) %}
+        {% set e_h = night_charge_earliest.split(':')[0]|int %}
+        {% set e_m = night_charge_earliest.split(':')[1]|int %}
+        {% set ws = morn.replace(hour=e_h, minute=e_m, second=0, microsecond=0) %}
+        {% set ws = (ws - timedelta(days=1)) if (e_h*60+e_m) > (m_h*60+m_m) else ws %}
+        {% set ns = namespace(best=none, best_t=999) %}
+        {% for f in _hourly_fc %}
+          {% set ft = as_local(as_datetime(f.datetime)) %}
+          {% if ws <= ft and ft <= window_end and (f.temperature | float(99)) < ns.best_t %}
+            {% set ns.best_t = f.temperature | float(99) %}
+            {% set ns.best = ft %}
+          {% endif %}
+        {% endfor %}
+        {% set slot = ns.best if ns.best is not none else window_end %}
+        {{ slot.isoformat() }}|{{ '%.1f' | format(ns.best_t if ns.best is not none else 0) }}|{{ window_end.isoformat() }}
+
+      _night_charge_time: "{{ _night_plan.split('|')[0] }}"
+      _night_charge_temp: "{{ _night_plan.split('|')[1] }}"
+      _window_end: "{{ _night_plan.split('|')[2] }}"
+
+      # WANN: jetzt im Slot-Fenster und Bedarf besteht und Sperrzeit ok.
+      _should_charge_night: "{{ _night_charge_needed and _charge_interval_ok and (as_datetime(_night_charge_time) <= now()) and (now() <= as_datetime(_window_end)) }}"
+
+      _should_charge: "{{ _water_valid and _plant_ok and (_should_charge_emergency or _should_charge_night) }}"
+
+      # Echter nächster Ladezeitpunkt (für input_datetime)
+      _next_charge_time: >
+        {% if _should_charge %}{{ now().isoformat() }}
+        {% elif _night_charge_needed %}{{ _night_charge_time }}
+        {% elif _hours_until_min_temp | float < 168 %}{{ (now() + timedelta(hours=_hours_until_min_temp | float)).isoformat() }}
+        {% else %}{{ (now() + timedelta(days=7)).isoformat() }}{% endif %}
+
+      # Für den Status-Einzeiler: wann Wasser min_temp erreicht (NICHT echter Ladezeitpunkt).
+      _next_charge_ts: >
+        {% if _hours_until_min_temp | float > 72 %}>3 Tage
+        {% else %}{{ (now() + timedelta(hours=_hours_until_min_temp | float)).strftime('%d.%m. %H:%M') }}{% endif %}
+
+      # Klartext-Grund (Priorität = bindende Bedingung in Reihenfolge von _should_charge).
+      _block_reason: >
+        {%- if not _water_valid -%}
+        ⚠️ Sensor ungültig ({{ _water_raw }})
+        {%- elif not _plant_ok -%}
+        ⛔ Anlage auf „{{ _plant_state | trim }}" – Laden nur bei {{ plant_state_allowed }}
+        {%- elif _should_charge_emergency and _should_charge -%}
+        🚨 Notfall-Ladung läuft ({{ _water_temp | round(1) }}°C ≤ {{ (min_temperature | float - 3) | round(0) }}°C)
+        {%- elif _should_charge -%}
+        ⚡ Nachtladung läuft (kältester Punkt {{ _night_charge_temp }}°C)
+        {%- elif not _charge_interval_ok -%}
+        ⏲️ Sperrzeit – nächste Ladung frühestens in {{ min_charge_interval | int - _minutes_since_last | int }} min
+        {%- elif _water_temp | float >= prediction_activation_threshold | float -%}
+        ✅ Wasser warm genug ({{ _water_temp | round(1) }}°C ≥ {{ prediction_activation_threshold }}°C Schwelle)
+        {%- elif not _night_charge_needed -%}
+        ✅ Vorrat reicht: Mo→{{ _predicted_morning_temp | round(1) }}°C, Ab→{{ _predicted_evening_temp | round(1) }}°C
+        {%- elif as_datetime(_night_charge_time) > now() -%}
+        🌙 Nachtladung geplant {{ as_local(as_datetime(_night_charge_time)).strftime('%d.%m %H:%M') }} (kältester Punkt {{ _night_charge_temp }}°C)
+        {%- elif now() > as_datetime(_window_end) -%}
+        ⏰ Nachtfenster verpasst – warte auf Notfall-Boden
+        {%- else -%}
+        … bereit, lädt beim nächsten Lauf
+        {%- endif -%}
+
+  # --- Laden wenn nötig ---
+  - if: "{{ _should_charge }}"
+    then:
+      - choose:
+          - conditions: "{{ extra_charge_service.split('.')[0] == 'button' }}"
+            sequence:
+              - service: button.press
+                target:
+                  entity_id: "{{ extra_charge_service }}"
+          - conditions: "{{ extra_charge_service.split('.')[0] == 'switch' }}"
+            sequence:
+              - service: switch.turn_on
+                target:
+                  entity_id: "{{ extra_charge_service }}"
+          - conditions: "{{ extra_charge_service.split('.')[0] == 'select' }}"
+            sequence:
+              - service: select.select_option
+                target:
+                  entity_id: "{{ extra_charge_service }}"
+                data:
+                  option: "{{ extra_charge_select_option }}"
+          - conditions: "{{ extra_charge_service.split('.')[0] == 'water_heater' }}"
+            sequence:
+              - service: water_heater.set_operation_mode
+                target:
+                  entity_id: "{{ extra_charge_service }}"
+                data:
+                  operation_mode: "boost"
+
+      - service: logbook.log
+        data:
+          name: "Froeling Extraladen"
+          message: >
+            Extraladen gestartet:
+            Wassertemp={{ _water_temp }}°C,
+            Notfall={{ _should_charge_emergency }},
+            Nachtladung={{ _should_charge_night }},
+            VorhersageMorgen={{ _predicted_morning_temp }}°C,
+            VorhersageAbend={{ _predicted_evening_temp }}°C,
+            kältesterPunkt={{ _night_charge_temp }}°C,
+            MinutenSeitLetztemBefehl={{ _minutes_since_last }}
+
+      # Zeitstempel des BEFEHLS (steuert nur die Sperrzeit). Ob tatsaechlich
+      # geladen wurde, stellt die Automation "Brauchwasserladung erfassen" fest
+      # und schreibt input_datetime.letzte_brauchwasser_ladung.
+      - service: input_datetime.set_datetime
+        target:
+          entity_id: input_datetime.letzter_brauchwasser_befehl
+        data:
+          datetime: "{{ now().isoformat() }}"
+
+      # Auftrag gilt als offen, bis der Kessel den Modus auf Auto zuruecksetzt.
+      # Daran erkennt die Erfassung, dass eine Erwaermung von hier stammt.
+      - service: input_boolean.turn_on
+        target:
+          entity_id: input_boolean.brauchwasser_befehl_offen
+
+      # Vorbelegung fuer den Fall, dass der Kessel bereits laeuft und deshalb
+      # kein neuer Kesselstart ("Vorbereitung") folgt.
+      - service: input_text.set_value
+        target:
+          entity_id: input_text.brauchwasser_startquelle
+        data:
+          value: "Automation"
+
+  # --- Status-Einzeiler (wenn konfiguriert) ---
+  - if: "{{ status_sensor not in ['', None] }}"
+    then:
+      - service: input_text.set_value
+        target:
+          entity_id: "{{ status_sensor }}"
+        data:
+          value: >
+            {%- if _water_raw in ['unknown', 'unavailable'] -%}
+            Sensor nicht verfügbar
+            {%- else -%}
+            {%- if _should_charge %}⚡Lädt{% elif _should_charge_emergency %}🚨Notfall{% else %}⏳Warten{% endif %} |
+            {{- ' ' ~ (_water_temp | round(1)) }}°C |
+            {{- ' ' ~ ('%.2f' | format(_heat_loss_now | float)) }}°C/h |
+            Mo→{{ _predicted_morning_temp | round(1) }}°C{{ '✓' if _predicted_morning_temp | float >= min_temperature | float else '✗' }} |
+            Ab→{{ _predicted_evening_temp | round(1) }}°C{{ '✓' if _predicted_evening_temp | float >= min_temperature | float else '✗' }} |
+            Min~{{ _hours_until_min_temp }}h ({{ _next_charge_ts }})
+            {%- endif %}
+
+  # --- Nächster Ladezeitpunkt (wenn konfiguriert) ---
+  - if: "{{ next_charge_sensor not in ['', None] }}"
+    then:
+      - service: input_datetime.set_datetime
+        target:
+          entity_id: "{{ next_charge_sensor }}"
+        data:
+          datetime: "{{ as_local(as_datetime(_next_charge_time)).strftime('%Y-%m-%d %H:%M:%S') }}"
+
+  # --- Warte-Grund (wenn konfiguriert) ---
+  - if: "{{ reason_sensor not in ['', None] }}"
+    then:
+      - service: input_text.set_value
+        target:
+          entity_id: "{{ reason_sensor }}"
+        data:
+          value: "{{ _block_reason | trim }}"
+
+mode: single
+max_exceeded: silent

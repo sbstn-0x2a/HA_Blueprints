@@ -1,0 +1,33 @@
+# Beispiel-Instanz für automations.yaml / example instance for automations.yaml
+#
+# Normalerweise legst du die Automation über die Oberfläche an (Einstellungen >
+# Automationen > Automation erstellen > Aus einem Blueprint). Dieser Block zeigt,
+# wie das Ergebnis aussieht, und dient als Vorlage für die Eingabewerte.
+#
+# You would normally create the automation through the UI (Settings > Automations >
+# Create automation > Use a blueprint). This block shows what the result looks like
+# and serves as a template for the input values.
+#
+# Die Entity-IDs stammen aus der Ursprungsinstallation und müssen angepasst werden.
+# The entity IDs come from the original installation and need to be adjusted.
+
+- id: '1700000000000'
+  alias: Intelligente Brauchwasser-Steuerung via Fröling Extraladen v0.9
+  description: ''
+  use_blueprint:
+    path: froeling/froeling_dhw_extra_charge.yaml
+    input:
+      water_temperature_sensor: sensor.boiler_1_temperatur_oben
+      outdoor_temperature_sensor: sensor.temperatur_heizungsraum
+      weather_forecast_entity: weather.forecast_home
+      extra_charge_service: select.12345_boiler_01_mode
+      plant_state_sensor: sensor.anlagenzustand
+      plant_state_allowed: Brauchwasser
+      heat_loss_coefficient: 0.011
+      min_temperature: 42
+      prediction_activation_threshold: 56
+      charge_duration_hours: 2.5
+      night_charge_earliest: '22:00:00'
+      status_sensor: input_text.brauchwasser_vorhersage_status
+      next_charge_sensor: input_datetime.naechste_brauchwasser_ladung
+      reason_sensor: input_text.brauchwasser_warte_grund
