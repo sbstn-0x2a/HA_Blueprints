@@ -45,6 +45,8 @@ v1 had two defects that only showed up in operation:
 
 A third fix guards against the peak time sensor being `unknown` while the solar forecast reloads — `as_datetime(None)` raised an `AttributeError` and discarded the whole control cycle (10 times on 2026-08-30). Such a cycle is now skipped silently; the next tick takes over.
 
+**Forecast gates with hysteresis (2026-09-17).** The automation only controls charging while the daily forecast and the peak-hour energy are above their thresholds. Open-Meteo recalculates the forecast every three hours, and on days close to a threshold a single update switched the control off in the middle of the morning — `Auto` mode, no charge limit, the battery charged at full power. In September 2026 this happened on 5 of 17 days for the peak hour and on 3 for the daily forecast; the forecasted peak hour moved by a median of 0.58 kWh within a day. Both gates now have an optional hysteresis: enable at the threshold, disable only below *threshold − hysteresis*. An `input_boolean` remembers whether the gate is open and is reset outside the control window, so every day starts at the enable threshold. With hysteresis `0` (the default) the behaviour is unchanged.
+
 ---
 
 ## Requirements
@@ -54,6 +56,7 @@ A third fix guards against the peak time sensor being `unknown` while the solar 
 - **Solar Forecast:** [Open-Meteo Solar Forecast](https://github.com/flowolf/ha-open-meteo-solar-forecast) HACS integration with `wh_period` attribute and a *remaining* sensor
 - **Grid Meter:** Any energy meter with signed grid power (negative = feed-in), e.g. Shelly Pro 3EM
 - **Helper (required):** one `input_number` as the memory for the last commanded charge power — see `package_bms_soc_target.yaml`
+- **Helper (optional):** one `input_boolean` as the gate memory, only needed for the forecast hysteresis — also in `package_bms_soc_target.yaml`
 - **Smoothed grid sensor (strongly recommended):** a 5-minute mean of the grid power, created via **Settings → Devices & Services → Helpers → Statistics**. Pass that sensor as `grid_power_sensor` instead of the raw meter.
 - **EV Charging (optional):** [evcc](https://evcc.io/) with [ha-evcc](https://github.com/marq24/ha-evcc) HACS integration with binary `connected` sensors per charger
 
@@ -87,6 +90,9 @@ A third fix guards against the peak time sensor being `unknown` while the solar 
 | Step size (`step_w`) | Power adjustment per regulation cycle when ramping up or down (W) | `500` |
 | Minimum daily forecast (`forecast_limit`) | Forecasted daily yield must exceed this value — otherwise automation stays inactive (bad weather) (kWh) | `40` |
 | Minimum peak energy (`peak_power_limit`) | Forecasted peak-hour energy must exceed this value — otherwise automation stays inactive (kWh) | `7.5` |
+| Daily forecast hysteresis (`forecast_hysteresis`) | Once enabled, the automation only deactivates when the daily forecast drops below `forecast_limit` minus this value (kWh). `0` = no hysteresis | `0` |
+| Peak energy hysteresis (`peak_power_hysteresis`) | Same for the peak-hour energy: deactivate only below `peak_power_limit` minus this value (kWh). `0` = no hysteresis | `0` |
+| Gate memory (`gate_state_helper`) | Optional `input_boolean` remembering whether the gates are open — required for the hysteresis, reset automatically outside the control window | *(none)* |
 | Read scale factor (`read_scale_factor`) | Correction divisor for reading back the current charge limit from the BMS — normally 1 | `1` |
 
 ---
@@ -103,8 +109,8 @@ The automation is deactivated (switches to `off_mode`) when:
 - Outside the active time window (defined by hours before and after peak: `pre_peak_hours`, `post_peak_hours`)
 - SOC has reached the configured maximum (`soc_max`)
 - EV is connected (`ev_connected_sensor_1/2`)
-- Daily forecast is below the minimum threshold for activation (`forecast_limit`)
-- Peak-hour energy is below the minimum threshold for activation (`peak_power_limit`)
+- Daily forecast is below the minimum threshold for activation (`forecast_limit`) — once enabled: below `forecast_limit − forecast_hysteresis`
+- Peak-hour energy is below the minimum threshold for activation (`peak_power_limit`) — once enabled: below `peak_power_limit − peak_power_hysteresis`
 
 ---
 

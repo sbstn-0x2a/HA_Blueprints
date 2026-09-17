@@ -45,6 +45,8 @@ Die v1 hatte zwei Defekte, die erst im Betrieb auffielen:
 
 Ein dritter Fix fängt ab, dass der Peakzeit-Sensor während eines Reloads der Solarprognose kurz `unknown` ist — `as_datetime(None)` warf einen `AttributeError` und verwarf den kompletten Regelzyklus (10-mal am 30.08.2026). Ein solcher Zyklus wird jetzt still ausgelassen, der nächste Tick übernimmt.
 
+**Prognose-Torwächter mit Hysterese (17.09.2026).** Die Automation steuert nur, solange Tagesprognose und Energie der Spitzenstunde über ihren Schwellen liegen. Open-Meteo rechnet die Prognose alle drei Stunden neu, und an Tagen knapp an einer Schwelle hat ein einzelnes Update die Steuerung mitten am Vormittag abgeschaltet — Modus `Auto`, kein Ladelimit, der Akku lud ungebremst. Im September 2026 passierte das an 5 von 17 Tagen bei der Spitzenstunde und an 3 bei der Tagesprognose; die prognostizierte Spitzenstunde schwankte innerhalb eines Tages im Median um 0,58 kWh. Beide Torwächter haben jetzt eine optionale Hysterese: Freigabe ab dem Schwellwert, Sperre erst unter *Schwellwert − Hysterese*. Ein `input_boolean` merkt sich, ob das Tor offen ist, und wird außerhalb des Steuerfensters zurückgesetzt — jeder Tag beginnt also wieder mit der Freigabeschwelle. Mit Hysterese `0` (Standard) bleibt das Verhalten unverändert.
+
 ---
 
 ## Voraussetzungen
@@ -54,6 +56,7 @@ Ein dritter Fix fängt ab, dass der Peakzeit-Sensor während eines Reloads der S
 - **Solarprognose:** [Open-Meteo Solar Forecast](https://github.com/flowolf/ha-open-meteo-solar-forecast) via HACS, mit `wh_period`-Attribut und einem *Remaining*-Sensor
 - **Stromzähler:** Beliebiger Energiezähler mit vorzeichenbehafteter Netzleistung (negativ = Einspeisung), z.B. Shelly Pro 3EM
 - **Helfer (erforderlich):** ein `input_number` als Merker für die zuletzt gesetzte Ladeleistung — siehe `package_bms_soc_target.yaml`
+- **Helfer (optional):** ein `input_boolean` als Torwächter-Merker, nur für die Prognose-Hysterese nötig — ebenfalls in `package_bms_soc_target.yaml`
 - **Geglätteter Netzsensor (dringend empfohlen):** ein 5-Minuten-Mittel der Netzleistung, angelegt über **Einstellungen → Geräte & Dienste → Helfer → Statistik**. Diesen Sensor als `grid_power_sensor` eintragen, nicht den Rohwert.
 - **E-Auto-Laden (optional):** [evcc](https://evcc.io/) mit [ha-evcc](https://github.com/marq24/ha-evcc) HACS Integration und binären `connected`-Sensoren je Ladepunkt
 ---
@@ -86,6 +89,9 @@ Ein dritter Fix fängt ab, dass der Peakzeit-Sensor während eines Reloads der S
 | Regelschrittweite (`step_w`) | Leistungsänderung je Regelzyklus beim Hoch- oder Runterregeln (W) | `500` |
 | Mindest-Tagesertrag (`forecast_limit`) | Prognostizierter Tagesertrag muss diesen Wert überschreiten — sonst bleibt die Automation inaktiv (schlechtes Wetter) (kWh) | `40` |
 | Mindest-Peak-Leistung (`peak_power_limit`) | Prognostizierte Peak-Stundenenergie muss diesen Wert überschreiten — sonst bleibt die Automation inaktiv (kWh) | `7.5` |
+| Hysterese Tagesertrag (`forecast_hysteresis`) | Einmal freigegeben, sperrt die Automation erst, wenn die Tagesprognose unter `forecast_limit` minus diesen Wert fällt (kWh). `0` = keine Hysterese | `0` |
+| Hysterese Peak-Stunde (`peak_power_hysteresis`) | Ebenso für die Energie der Spitzenstunde: Sperre erst unter `peak_power_limit` minus diesen Wert (kWh). `0` = keine Hysterese | `0` |
+| Torwächter-Merker (`gate_state_helper`) | Optionaler `input_boolean`, der sich merkt, ob die Torwächter freigegeben haben — für die Hysterese nötig, wird außerhalb des Steuerfensters automatisch zurückgesetzt | *(keiner)* |
 | Skalierungsfaktor (`read_scale_factor`) | Korrekturfaktor für die Rücklesung der aktuellen Ladeleistung vom BMS — normalerweise 1 | `1` |
 
 ---
@@ -102,8 +108,8 @@ Die Automation schaltet in den Ruhemodus wenn:
 - Außerhalb des aktiven Zeitfensters (definiert durch Vorlaufzeit vor Peak und Nachlaufzeit nach Peak: `pre_peak_hours`, `post_peak_hours`)
 - Ladestand hat das konfigurierte Maximum erreicht (`soc_max`)
 - E-Auto ist angesteckt (`ev_connected_sensor_1/2`)
-- Prognostizierter Tagesertrag liegt unter dem Mindest-Schwellwert für Aktivierung (`forecast_limit`)
-- Prognostizierte Peak-Stundenenergie liegt unter dem Mindest-Schwellwert für Aktivierung (`peak_power_limit`)
+- Prognostizierter Tagesertrag liegt unter dem Mindest-Schwellwert für Aktivierung (`forecast_limit`) — nach Freigabe erst unter `forecast_limit − forecast_hysteresis`
+- Prognostizierte Peak-Stundenenergie liegt unter dem Mindest-Schwellwert für Aktivierung (`peak_power_limit`) — nach Freigabe erst unter `peak_power_limit − peak_power_hysteresis`
 
 ---
 

@@ -282,6 +282,51 @@ blueprint:
           step: 0.1
           unit_of_measurement: kWh
 
+    forecast_hysteresis:
+      name: Hysterese Tagesertrag (kWh)
+      description: >
+        Einmal freigegeben, sperrt die Automation erst wieder, wenn der
+        prognostizierte Tagesertrag unter (Mindest-Tagesertrag - Hysterese)
+        faellt. Verhindert, dass die dreistuendlichen Prognose-Updates die
+        Steuerung mitten am Vormittag ab- und wieder anschalten.
+        0 = keine Hysterese. Wirkt nur mit gesetztem Torwaechter-Merker.
+      default: 0
+      selector:
+        number:
+          min: 0
+          max: 20
+          step: 0.5
+          unit_of_measurement: kWh
+
+    peak_power_hysteresis:
+      name: Hysterese Peak-Stunden-Energie (kWh)
+      description: >
+        Wie oben fuer die Peak-Stunden-Energie. Freigabe ab
+        Mindest-Peak-Leistung, Sperre erst unter
+        (Mindest-Peak-Leistung - Hysterese). Messung September 2026: die
+        Prognose der Spitzenstunde schwankt innerhalb eines Tages im Median
+        um 0,58 kWh. 0 = keine Hysterese.
+      default: 0
+      selector:
+        number:
+          min: 0
+          max: 5
+          step: 0.1
+          unit_of_measurement: kWh
+
+    gate_state_helper:
+      name: Torwaechter-Merker (input_boolean, optional)
+      description: >
+        Haelt fest, ob die Torwaechter (Tagesertrag, Peak-Stunde) im
+        laufenden Steuerfenster freigegeben haben. Ohne Merker keine
+        Hysterese. Wird ausserhalb des Steuerfensters automatisch
+        zurueckgesetzt, jeder Tag beginnt also mit der Freigabeschwelle.
+      default: ""
+      selector:
+        entity:
+          filter:
+            domain: input_boolean
+
     read_scale_factor:
       name: Skalierungsfaktor für Rücklesung (Divisor)
       description: >
@@ -334,6 +379,9 @@ action:
       step: !input step_w
       f_limit: !input forecast_limit
       pp_limit: !input peak_power_limit
+      f_hyst: !input forecast_hysteresis
+      pp_hyst: !input peak_power_hysteresis
+      gate_entity: !input gate_state_helper
       scale: !input read_scale_factor
       ev1_entity: !input ev_connected_sensor_1
       ev2_entity: !input ev_connected_sensor_2
@@ -408,6 +456,24 @@ action:
            and current_soc < soc_limit
            and (hours_to_peak >= 0 or remaining_val > 0) }}
 
+      # Torwaechter mit Hysterese. Die Solarprognose wird alle drei Stunden
+      # neu gerechnet; ihre Spitzenstunde schwankte im September 2026 im
+      # Median um 0,58 kWh pro Tag. Mit einem harten Schwellwert hat das die
+      # Steuerung an 5 von 17 Tagen mitten am Vormittag abgeschaltet
+      # (17.09.2026: 7,36 -> 6,78 kWh bei Grenze 6,8, Modus Auto um 09:47).
+      # War das Tor im laufenden Fenster schon offen, gilt die untere Schwelle.
+      in_window: >
+        {{ hours_to_peak < pre_peak_h and hours_to_peak > -post_peak_h }}
+      gate_was_open: >
+        {{ gate_entity != '' and is_state(gate_entity, 'on') }}
+      f_threshold: >
+        {{ (f_limit | float) - ((f_hyst | float) if gate_was_open else 0) }}
+      pp_threshold: >
+        {{ (pp_limit | float) - ((pp_hyst | float) if gate_was_open else 0) }}
+      gate_open: >
+        {{ (forecast_val | float) >= (f_threshold | float)
+           and (peak_power | float) >= (pp_threshold | float) }}
+
       # Benötigte Ladeleistung, abhängig von der aktuellen Phase:
       #   SOC < Ziel, vor Peak:           Lücke zu effective_target_soc verteilt auf hours_to_peak
       #   SOC >= Ziel, vor Peak:          Lücke zu soc_max verteilt auf (hours_to_peak + post_peak_h)
@@ -440,9 +506,7 @@ action:
           0
         {% elif not active_phase %}
           0
-        {% elif forecast_val < f_limit %}
-          0
-        {% elif peak_power < pp_limit %}
+        {% elif not gate_open %}
           0
         {% elif grid_power <= threshold %}
           {{ [current + s, max_charge_w] | min }}
@@ -451,6 +515,17 @@ action:
         {% else %}
           {{ [current + s, req] | min }}
         {% endif %}
+
+  # Torwaechter-Zustand fuer die Hysterese festhalten. Ausserhalb des
+  # Steuerfensters immer zuruecksetzen, damit der naechste Tag wieder mit der
+  # Freigabeschwelle beginnt.
+  - if:
+      - condition: template
+        value_template: "{{ gate_entity != '' }}"
+    then:
+      - service: "input_boolean.turn_{{ 'on' if (in_window and gate_open) else 'off' }}"
+        target:
+          entity_id: "{{ gate_entity }}"
 
   # v2: Sollwert zuerst im Merker festhalten - unabhaengig davon, ob die Number
   # gerade existiert. Das ist die eigentliche Korrektur gegen die abbrechende Rampe.
