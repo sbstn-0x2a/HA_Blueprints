@@ -1,0 +1,19 @@
+# Comfee-Luftentfeuchter CDDKE-16DEN7 (EU): Timer-Erweiterung midea_a1_timer laden.
+#
+# Ablage: /config/packages/comfee_entfeuchter.yaml
+# Voraussetzung in configuration.yaml:
+#   homeassistant:
+#     packages: !include_dir_named packages
+#
+# device_id = Device-ID des Geräts in midea_ac_lan (dieselbe Zahl, die in den
+# Entity-IDs steckt, z. B. humidifier.<device_id>_humidifier).
+# Aus name werden die Entity-IDs gebildet:
+#   select.comfee_luftentfeuchter_timer
+#   sensor.comfee_luftentfeuchter_timer_restzeit
+#
+# Nach dem ersten Anlegen HA neu starten, ein YAML-Reload reicht nicht.
+
+midea_a1_timer:
+  devices:
+    - device_id: 123456789012345
+      name: Comfee Luftentfeuchter

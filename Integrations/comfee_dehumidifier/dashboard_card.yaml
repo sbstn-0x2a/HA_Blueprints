@@ -1,0 +1,55 @@
+# Bubble Card (HACS-Frontend, getestet mit 3.4.1) für den Comfee-Luftentfeuchter CDDKE-16DEN7 (EU).
+# 123456789012345 durch die eigene Device-ID aus midea_ac_lan ersetzen.
+#
+# step: 5 – das Gerät nimmt nur 5er-Schritte an und rundet auf den nächsten
+#           (73 -> 75, 72 -> 70, 68 -> 70).
+# Die Zeile "Rest" erscheint nur, solange ein Timer läuft.
+
+type: custom:bubble-card
+card_type: climate
+entity: humidifier.123456789012345_humidifier
+name: Luftentfeuchter
+icon: mdi:air-humidifier
+step: 5
+state_content:
+- current_humidity
+sub_button:
+  main:
+  - entity: humidifier.123456789012345_humidifier
+    name: Ein/Aus
+    icon: mdi:power
+    tap_action:
+      action: toggle
+  bottom:
+  - name: Steuerung
+    group:
+    - sub_button_type: select
+      entity: humidifier.123456789012345_humidifier
+      name: Modus
+      icon: mdi:tune-variant
+      select_attribute: available_modes
+      show_arrow: false
+      state_content: mode
+    - sub_button_type: select
+      entity: select.123456789012345_fan_speed
+      name: Lüfter
+      icon: mdi:fan
+      show_arrow: false
+      state_content: state
+    - sub_button_type: select
+      entity: select.comfee_luftentfeuchter_timer
+      name: Timer
+      icon: mdi:timer-outline
+      show_arrow: false
+      state_content: state
+    - entity: sensor.comfee_luftentfeuchter_timer_restzeit
+      name: Rest
+      icon: mdi:timer-sand
+      visibility:
+      - condition: state
+        entity: select.comfee_luftentfeuchter_timer
+        state_not: Aus
+      state_content: state
+rows: 1.719
+grid_options:
+  columns: full
