@@ -1,3 +1,58 @@
+# Version 0.11 (2026-10-01)
+# - QUITTIERUNG UND WIEDERHOLUNG. Anlass: In der Nacht zum 01.10.2026 setzte die
+#   Automation um 02:00 den Extraladen-Befehl ab (Dienstaufruf im Recorder belegt),
+#   die Cloud-Integration meldete keinen Fehler, die Anlage reagierte aber nicht.
+#   Danach lief die Sperrzeit (min_charge_interval) sechs Stunden gegen einen Befehl,
+#   der nie angekommen war - auch der Notfall-Boden war damit stillgelegt.
+#   Jetzt gilt ein Befehl erst als angekommen, wenn
+#     a) der Kesselzustand nicht mehr boiler_idle_state ist (schnellstes Signal:
+#        beim Handtest 01.10. lagen zwischen Befehl und "Vorbereitung" 3 Sekunden), oder
+#     b) die Wassertemperatur ueber dem beim Absetzen gemerkten Wert liegt.
+#   War der Kessel beim Absetzen bereits in Betrieb, taugt (a) nicht als Beweis;
+#   dann zaehlt nur (b). Deshalb merkt sich der Lade-Zweig beides.
+#   Bis zur Quittierung wiederholt die Automation den Befehl beim naechsten Lauf,
+#   solange das Wiederholfenster (command_retry_window, Standard 30 min) laeuft. Die Sperrzeit laeuft erst ab Quittierung.
+#   Bleibt auch der letzte Versuch unquittiert, gibt es Logbucheintrag und - wenn
+#   notify_service gesetzt - eine Push-Meldung; die Sperrzeit wird freigegeben,
+#   damit der naechste regulaere Anlass (z. B. Notfall-Boden) wieder greift.
+# - EIN neuer Helfer: input_text.brauchwasser_befehl_basis traegt beide gemerkten
+#   Werte als "<Wassertemperatur>|<1 = Kessel ruhte>". Ein Versuchszaehler ist nicht
+#   noetig, weil die Wiederholung an der Zeit seit dem Befehl haengt.
+#
+# Version 0.10 (2026-09-18)
+# - ANSTEUERUNG waehlbar (Input control_mode): "cloud" = wie v0.9 ueber die
+#   Extraladen-Entitaet der Cloud-Integration; "modbus" = ueber die Kesselfernsteuerung
+#   der Integration froeling_s3200_modbus (ab 0.6.0). Geraetetest 13.09.2026: der
+#   Boiler-Sollwert (Register 48019) startet den Kessel im Anlagenzustand
+#   "Brauchwasser", sobald Boiler oben unter  Soll - (Gewuenscht - Nachladen ab)  liegt;
+#   Ladeende genau am Sollwert. Mit den Werkswerten 65/35 laege die Startschwelle bei
+#   35 C. Deshalb stellt der Lade-Zweig fuer die Dauer der Ladung BEIDE Werte um
+#   (Gewuenscht 50, Nachladen 45 -> Start unter 60 C) und der Ende-Zweig stellt beide
+#   zurueck (65/35). Ausserhalb einer Ladung stehen also die Werkswerte - kein
+#   eigenstaendiges Nachladen bei 45 C. Das ist exakt der Rueckbau aus dem Geraetetest.
+#   Ende-Zweig: Ziel erreicht oder modbus_max_minutes seit dem Befehl -> Regelung
+#   zurueck auf "kessel", Werte zurueck, Auftrag geschlossen. Zusaetzlich stellt ein
+#   Aufraeum-Zweig die Werte zurueck, falls sie ohne laufende Ladung noch auf 50/45
+#   stehen (z. B. Regelung von Hand zurueckgesetzt).
+#   Hinweis: Die Fernsteuerung wirkt fuer alle Heizkreise zugleich. Im Anlagenzustand
+#   "Brauchwasser" ist das neutral; wer "Automatik" freigibt, gibt HK2 fuer die Dauer
+#   der Ladung an Home Assistant ab.
+# - EREIGNISBETRIEB unter einer Aussentemperatur-Schwelle (Inputs outdoor_mean_sensor,
+#   event_mode_threshold, Default 15 C). Massgeblich ist das Mittel der naechsten 24 h
+#   aus der DWD-Vorhersage; fehlt sie, der Rueckfall-Sensor (z. B. ein Statistik-Helfer
+#   "Mittelwert, 24 h"). Ohne beides bleibt es beim Sommerbetrieb.
+#     Sommerbetrieb (Mittel >= Schwelle): wie bisher - eine Nachtladung deckt Morgen
+#       UND Abend ab.
+#     Ereignisbetrieb (Mittel < Schwelle): jedes Ereignis bekommt seine eigene Ladung.
+#       Engpass am Morgen -> Nachtladung wie bisher. Engpass nur am Abend -> Ladung
+#       ab evening_ready - Ladedauer (Standard 15:30), statt schon in der Nacht davor.
+#   Die Aussentemperatur entscheidet weiterhin nur WANN, nie OB geladen wird.
+#   Anlass: Alle 23 Nachtladungen der Saison 2026 lagen am Fensterende (22x 02:00,
+#   1x 01:00); ein Abend-Engpass wurde ~16 h zu frueh geladen (65 C -> ~58 C bis 18:00).
+# - extra_charge_service ist jetzt optional (nur fuer control_mode "cloud").
+# - Logbuch um Abendladung, Betriebsart, Aussenmittel und Ansteuerung erweitert.
+# - Status-Einzeiler unveraendert (bewusst festes Format).
+#
 # Version 0.9 (2026-09-12)
 # - Entity-Picker statt Textfeld fuer weather_forecast_entity, plant_state_sensor,
 #   status_sensor, next_charge_sensor, reason_sensor (mit Domain-Filter). Vorher waren
@@ -60,12 +115,13 @@
 # - status_sensor, top-level condition entfernt, zentraler variables-Step.
 
 blueprint:
-  name: Intelligente Brauchwasser-Steuerung via Fröling Extraladen v0.9
+  name: Intelligente Brauchwasser-Steuerung via Fröling Extraladen v0.11
   description: >
-    Comfort-first Brauchwasser-Steuerung für einen Fröling-Pelletkessel via Extraladen.
-    Lädt bevorzugt nachts (kältester DWD-Stundenwert = geringstes Kondensat-Risiko),
-    wenn die exponentielle Temperaturvorhersage für den nächsten Morgen oder Abend die
-    Mindesttemperatur unterschreitet. Notfall-Boden schützt jederzeit. Solar entfernt.
+    Comfort-first Brauchwasser-Steuerung für einen Fröling-Pelletkessel, wahlweise über
+    die Cloud-Extraladung oder die Modbus-Kesselfernsteuerung. Sommerbetrieb: eine
+    Nachtladung zum kältesten DWD-Stundenwert deckt Morgen und Abend ab. Unter einer
+    Außentemperatur-Schwelle (Tagesmittel) Ereignisbetrieb: jede Engstelle am Morgen
+    oder Abend bekommt ihre eigene, rechtzeitige Ladung. Notfall-Boden schützt jederzeit.
   domain: automation
   input:
     water_temperature_sensor:
@@ -85,15 +141,56 @@ blueprint:
       name: Wettervorhersage-Entität (optional, DWD stündlich)
       description: >
         weather-Entität mit stündlicher Vorhersage (z.B. weather.forecast_home).
-        Wird per weather.get_forecasts abgefragt, um den kältesten Nacht-Stundenwert als
-        Ladezeitpunkt zu wählen. Leer lassen → Ladung am spätestmöglichen Punkt (morning_ready − Ladedauer).
+        Wird per weather.get_forecasts abgefragt: für den kältesten Nacht-Stundenwert als
+        Ladezeitpunkt und als Rückfallwert für das Außentemperatur-Mittel.
+        Leer lassen → Ladung am spätestmöglichen Punkt (morning_ready − Ladedauer).
       default: ""
       selector:
         entity:
           domain: weather
+    outdoor_mean_sensor:
+      name: Außentemperatur-Tagesmittel – Rückfall (optional)
+      description: >
+        Maßgeblich ist das Mittel der nächsten 24 h aus der Wettervorhersage. Nur wenn die
+        fehlt, gilt dieser Sensor, z.B. ein Statistik-Helfer (Merkmal Mittelwert, maximales
+        Alter 24 h) auf dem Außenfühler. Ohne beides: Sommerbetrieb.
+      default: ""
+      selector:
+        entity:
+          domain: sensor
+    event_mode_threshold:
+      name: Schwelle Ereignisbetrieb (Außentemperatur-Tagesmittel)
+      description: >
+        Liegt das Tagesmittel darunter, bekommt jede Engstelle (Morgen/Abend) ihre eigene
+        Ladung; ein Engpass nur am Abend wird dann am Nachmittag geladen statt in der Nacht
+        davor. Darüber Sommerbetrieb: eine Nachtladung deckt Morgen und Abend ab.
+        Entscheidet nur WANN geladen wird, nie OB.
+      default: 15
+      selector:
+        number:
+          min: -10
+          max: 30
+          step: 0.5
+          unit_of_measurement: "°C"
+          mode: box
+    control_mode:
+      name: Ansteuerung
+      description: >
+        "cloud": Extraladung über die Entität unten (z.B. select Boiler-Betriebsart der
+        Fröling-Cloud-Integration). "modbus": Ladung über die Kesselfernsteuerung der
+        Integration froeling_s3200_modbus (Modbus-Felder unten ausfüllen).
+      default: cloud
+      selector:
+        select:
+          options:
+            - label: Cloud (Extraladen)
+              value: cloud
+            - label: Modbus (Kesselfernsteuerung)
+              value: modbus
     extra_charge_service:
-      name: Fröling Extraladen Service/Entity
+      name: Fröling Extraladen Service/Entity (nur Cloud)
       description: Entität mit der das Laden ausgelöst wird. Knopf/Schalter/Heizung/Auswahlmenü
+      default: ""
       selector:
         entity:
           domain:
@@ -107,6 +204,100 @@ blueprint:
       default: "Extraladen"
       selector:
         text:
+    modbus_control_select:
+      name: Modbus – Regelungs-Auswahl der Fernsteuerung
+      description: Select "Regelung" im Gerät Fernsteuerung (z.B. select.<anlage>_fernsteuerung_regelung).
+      default: ""
+      selector:
+        entity:
+          domain: select
+    modbus_control_option:
+      name: Modbus – Option für die Ladung
+      description: Option, mit der Home Assistant die Vorgabe übernimmt.
+      default: home_assistant
+      selector:
+        text:
+    modbus_end_option:
+      name: Modbus – Option nach der Ladung
+      description: Option, mit der die Anlage wieder selbst regelt.
+      default: kessel
+      selector:
+        text:
+    modbus_setpoint_entity:
+      name: Modbus – Boiler-Solltemperatur der Fernsteuerung
+      description: Number "Boiler 1 Solltemperatur" im Gerät Fernsteuerung (Register 48019).
+      default: ""
+      selector:
+        entity:
+          domain: number
+    modbus_target:
+      name: Modbus – Zieltemperatur
+      description: Boiler-Soll für die Ladung. Die Anlage stoppt genau hier; über 65 °C lehnt sie ab.
+      default: 65
+      selector:
+        number:
+          min: 40
+          max: 65
+          unit_of_measurement: "°C"
+    modbus_desired_entity:
+      name: Modbus – „Gewünschte Boilertemperatur“ der Anlage
+      description: >
+        Number (Register 41632). Wird für die Dauer der Ladung umgestellt, damit die
+        Startschwelle Soll − (Gewünscht − Nachladen ab) über der Boilertemperatur liegt.
+      default: ""
+      selector:
+        entity:
+          domain: number
+    modbus_reload_entity:
+      name: Modbus – „Nachladen, wenn Boilertemperatur unter“ der Anlage
+      description: Number (Register 41633). Wird wie die gewünschte Temperatur nur während der Ladung umgestellt.
+      default: ""
+      selector:
+        entity:
+          domain: number
+    modbus_charge_desired:
+      name: Modbus – Gewünscht während der Ladung
+      description: Zusammen mit Nachladen 45 ergibt 50 ein Fenster von 5 K, also Start unter 60 °C bei Soll 65.
+      default: 50
+      selector:
+        number:
+          min: 45
+          max: 65
+          unit_of_measurement: "°C"
+    modbus_charge_reload:
+      name: Modbus – Nachladen ab während der Ladung
+      description: Doku-Maximum 45 °C.
+      default: 45
+      selector:
+        number:
+          min: 20
+          max: 45
+          unit_of_measurement: "°C"
+    modbus_restore_desired:
+      name: Modbus – Gewünscht nach der Ladung
+      default: 65
+      selector:
+        number:
+          min: 45
+          max: 80
+          unit_of_measurement: "°C"
+    modbus_restore_reload:
+      name: Modbus – Nachladen ab nach der Ladung
+      default: 35
+      selector:
+        number:
+          min: 20
+          max: 45
+          unit_of_measurement: "°C"
+    modbus_max_minutes:
+      name: Modbus – längste Ladedauer
+      description: Nach so vielen Minuten seit dem Befehl geht die Regelung auf jeden Fall zurück an die Anlage.
+      default: 180
+      selector:
+        number:
+          min: 30
+          max: 600
+          unit_of_measurement: "min"
     min_temperature:
       name: Mindesttemperatur
       description: Mindesttemperatur des Brauchwassers zum Morgen oder Abend
@@ -179,6 +370,44 @@ blueprint:
           step: 0.001
           unit_of_measurement: "1/h"
           mode: box
+    boiler_state_sensor:
+      name: Kesselzustand-Sensor (für die Quittierung)
+      description: >
+        Sensor mit dem Kesselzustand (z.B. sensor.<anlage>_kessel_kesselzustand). Verlässt er
+        nach einem Befehl den Ruhezustand, gilt der Befehl als angekommen. Leer lassen:
+        Quittierung nur über die Wassertemperatur.
+      default: ""
+      selector:
+        entity:
+          domain: sensor
+    boiler_idle_state:
+      name: Ruhezustände des Kessels
+      description: >
+        Kommaliste der Zustände, die "Kessel tut nichts" bedeuten. "Tür offen" gehört dazu,
+        sonst würde das Nachlegen am Kessel als Quittierung durchgehen.
+      default: "Betriebsbereit, Tür offen"
+      selector:
+        text:
+    command_retry_window:
+      name: Wiederholfenster
+      description: >
+        So lange nach dem ersten Befehl wird bei fehlender Quittierung erneut gesendet
+        (bei 10-Minuten-Takt ergeben 30 min also drei Versuche). Danach Meldung und Aufgabe.
+      default: 30
+      selector:
+        number:
+          min: 10
+          max: 120
+          step: 10
+          unit_of_measurement: "min"
+    notify_service:
+      name: Benachrichtigungsdienst (optional)
+      description: >
+        z.B. notify.mobile_app_handy. Meldet, wenn auch der letzte Versuch unquittiert bleibt.
+        Leer lassen = nur Logbuch.
+      default: ""
+      selector:
+        text:
     plant_state_sensor:
       name: Anlagenzustand-Sensor (optional)
       description: >
@@ -232,9 +461,28 @@ variables:
   evening_ready_time: !input evening_ready_time
   night_charge_earliest: !input night_charge_earliest
   charge_duration_hours: !input charge_duration_hours
+  outdoor_mean_sensor: !input outdoor_mean_sensor
+  event_mode_threshold: !input event_mode_threshold
+  control_mode: !input control_mode
+  modbus_control_select: !input modbus_control_select
+  modbus_control_option: !input modbus_control_option
+  modbus_end_option: !input modbus_end_option
+  modbus_setpoint_entity: !input modbus_setpoint_entity
+  modbus_target: !input modbus_target
+  modbus_desired_entity: !input modbus_desired_entity
+  modbus_reload_entity: !input modbus_reload_entity
+  modbus_charge_desired: !input modbus_charge_desired
+  modbus_charge_reload: !input modbus_charge_reload
+  modbus_restore_desired: !input modbus_restore_desired
+  modbus_restore_reload: !input modbus_restore_reload
+  modbus_max_minutes: !input modbus_max_minutes
   min_charge_interval: !input min_charge_interval
   prediction_activation_threshold: !input prediction_activation_threshold
   heat_loss_coefficient: !input heat_loss_coefficient
+  boiler_state_sensor: !input boiler_state_sensor
+  boiler_idle_state: !input boiler_idle_state
+  command_retry_window: !input command_retry_window
+  notify_service: !input notify_service
   plant_state_sensor: !input plant_state_sensor
   plant_state_allowed: !input plant_state_allowed
   status_sensor: !input status_sensor
@@ -298,13 +546,40 @@ action:
         {% set last = states('input_datetime.letzter_brauchwasser_befehl') %}
         {% if last in ['','unknown','unavailable'] %}99999
         {% else %}{{ ((now() - as_local(as_datetime(last))).total_seconds() / 60) | int }}{% endif %}
-      _charge_interval_ok: "{{ _minutes_since_last | int >= min_charge_interval | int }}"
+      # --- Quittierung des letzten Befehls -------------------------------------
+      _cmd_offen: "{{ is_state('input_boolean.brauchwasser_befehl_offen', 'on') }}"
+      # Ein einziger Helfer traegt beides: "<Wassertemperatur>|<1 = Kessel ruhte>"
+      _cmd_basis: "{{ states('input_text.brauchwasser_befehl_basis') }}"
+      _cmd_wasser: "{{ (_cmd_basis | string).split('|')[0] | float(-1) }}"
+      _cmd_kessel_war_bereit: "{{ ((_cmd_basis | string).split('|') | last) == '1' and '|' in (_cmd_basis | string) }}"
+      _kessel_laeuft: >-
+        {{ boiler_state_sensor not in ['', None]
+           and states(boiler_state_sensor) not in
+               ((boiler_idle_state | string).split(',') | map('trim') | list + ['unknown', 'unavailable']) }}
+      # a) Kessel hat den Ruhezustand verlassen - nur beweiskraeftig, wenn er beim
+      #    Absetzen ruhte. b) Wasser ist ueber den gemerkten Wert gestiegen.
+      _cmd_quittiert: >-
+        {{ (_cmd_kessel_war_bereit and _kessel_laeuft)
+           or (_cmd_wasser | float >= 0 and _water_temp | float > _cmd_wasser | float) }}
+      _cmd_unquittiert: "{{ _cmd_offen and not _cmd_quittiert }}"
+      # Wiederholen, solange Versuche offen sind; aufgeben danach.
+      _cmd_wiederholen: "{{ _cmd_unquittiert and _minutes_since_last | int <= command_retry_window | int }}"
+      # Neuer Ladezyklus: kein offener Befehl mehr ODER der alte ist aelter als die
+      # Sperrzeit (faengt ein haengendes "Befehl offen" ab, sonst bliebe die
+      # Quittierungs-Grundlage von vorgestern stehen und wuerde sofort erfuellt).
+      _cmd_neu: "{{ not _cmd_offen or _minutes_since_last | int >= min_charge_interval | int }}"
+      _cmd_aufgeben: "{{ _cmd_unquittiert and _minutes_since_last | int > command_retry_window | int }}"
+      # Sperrzeit gilt nur fuer angekommene Befehle; ein unquittierter blockiert nicht.
+      _charge_interval_ok: "{{ _minutes_since_last | int >= min_charge_interval | int or _cmd_wiederholen }}"
 
       # Notfall-Boden: echtes Sicherheitsnetz, jederzeit (auch tags), aber selten.
       _should_charge_emergency: "{{ _water_temp | float <= (min_temperature | float - 3) and _charge_interval_ok }}"
 
-      # OB überhaupt eine (Nacht-)Ladung nötig ist: Vorhersage Morgen ODER Abend < min.
-      _night_charge_needed: "{{ _water_valid and _water_temp | float < prediction_activation_threshold | float and ((_predicted_morning_temp | float < min_temperature | float) or (_predicted_evening_temp | float < min_temperature | float)) }}"
+      # Engstellen: reicht der Vorrat bis zum naechsten Morgen bzw. Abend?
+      # (Die Entscheidung, WANN sie geladen werden, faellt nach der Wetterabfrage.)
+      _needs_basis: "{{ _water_valid and _water_temp | float < prediction_activation_threshold | float }}"
+      _morning_short: "{{ _needs_basis and _predicted_morning_temp | float < min_temperature | float }}"
+      _evening_short: "{{ _needs_basis and _predicted_evening_temp | float < min_temperature | float }}"
 
   # --- DWD-Stundenvorhersage holen (nur wenn Entität gesetzt & verfügbar) ---
   - if: "{{ weather_forecast_entity not in ['', None] and states(weather_forecast_entity) not in ['unknown','unavailable','',None] }}"
@@ -348,15 +623,60 @@ action:
       _night_charge_temp: "{{ _night_plan.split('|')[1] }}"
       _window_end: "{{ _night_plan.split('|')[2] }}"
 
-      # WANN: jetzt im Slot-Fenster und Bedarf besteht und Sperrzeit ok.
-      _should_charge_night: "{{ _night_charge_needed and _charge_interval_ok and (as_datetime(_night_charge_time) <= now()) and (now() <= as_datetime(_window_end)) }}"
+      # Aussentemperatur-Tagesmittel: Mittel der naechsten 24 h aus der DWD-Vorhersage
+      # (mind. 12 Stundenwerte); fehlt die, der Rueckfall-Sensor; sonst leer.
+      _outdoor_source: >-
+        {% set v = states(outdoor_mean_sensor) if outdoor_mean_sensor not in ['', None] else 'none' %}
+        {% if _hourly_fc | count >= 12 %}DWD
+        {% elif v | is_number %}Sensor
+        {% else %}-{% endif %}
+      _outdoor_mean: >-
+        {% if _outdoor_source == 'Sensor' %}{{ states(outdoor_mean_sensor) | float | round(1) }}
+        {% elif _outdoor_source == 'DWD' %}
+          {% set ns = namespace(sum=0, n=0) %}
+          {% set von = now() - timedelta(hours=1) %}
+          {% for f in _hourly_fc %}
+            {% set ft = as_local(as_datetime(f.datetime)) %}
+            {% if ft > von and ft <= von + timedelta(hours=24) and f.temperature is number %}
+              {% set ns.sum = ns.sum + f.temperature %}
+              {% set ns.n = ns.n + 1 %}
+            {% endif %}
+          {% endfor %}
+          {{ (ns.sum / ns.n) | round(1) if ns.n > 0 else '' }}
+        {% endif %}
+      # Ereignisbetrieb nur mit gueltigem Mittel unter der Schwelle; sonst Sommerbetrieb.
+      _event_mode: "{{ _outdoor_mean | is_number and _outdoor_mean | float < event_mode_threshold | float }}"
+      _mode_label: >-
+        {% if _event_mode %}Ereignisbetrieb, Ø {{ _outdoor_mean }}°C < {{ event_mode_threshold }}°C
+        {% elif _outdoor_mean | is_number %}Sommerbetrieb, Ø {{ _outdoor_mean }}°C
+        {% else %}Sommerbetrieb{% endif %}
 
-      _should_charge: "{{ _water_valid and _plant_ok and (_should_charge_emergency or _should_charge_night) }}"
+      # OB nachts geladen wird: Sommerbetrieb Morgen ODER Abend, Ereignisbetrieb nur Morgen.
+      _night_charge_needed: "{{ _morning_short or (_evening_short and not _event_mode) }}"
+
+      # Abendfenster (nur Ereignisbetrieb): [naechster Abend - Ladedauer, naechster Abend]
+      _evening_plan: >
+        {% set cd = charge_duration_hours | float %}
+        {% set et = now().replace(hour=evening_ready_time.split(':')[0]|int, minute=evening_ready_time.split(':')[1]|int, second=0, microsecond=0) %}
+        {% set et = (et + timedelta(days=1)) if et <= now() else et %}
+        {{ (et - timedelta(hours=cd)).isoformat() }}|{{ et.isoformat() }}
+      _evening_charge_time: "{{ _evening_plan.split('|')[0] | trim }}"
+      _evening_end: "{{ _evening_plan.split('|')[1] | trim }}"
+      _evening_charge_needed: "{{ _event_mode and _evening_short }}"
+
+      # WANN: jetzt im jeweiligen Fenster, Bedarf besteht und Sperrzeit ok.
+      _should_charge_night: "{{ _night_charge_needed and _charge_interval_ok and (as_datetime(_night_charge_time) <= now()) and (now() <= as_datetime(_window_end)) }}"
+      _should_charge_evening: "{{ _evening_charge_needed and _charge_interval_ok and (as_datetime(_evening_charge_time) <= now()) and (now() < as_datetime(_evening_end)) }}"
+
+      _should_charge: "{{ _water_valid and _plant_ok and (_should_charge_emergency or _should_charge_night or _should_charge_evening) }}"
 
       # Echter nächster Ladezeitpunkt (für input_datetime)
       _next_charge_time: >
+        {% set kand = [] %}
+        {% if _night_charge_needed %}{% set kand = kand + [as_datetime(_night_charge_time)] %}{% endif %}
+        {% if _evening_charge_needed %}{% set kand = kand + [as_datetime(_evening_charge_time)] %}{% endif %}
         {% if _should_charge %}{{ now().isoformat() }}
-        {% elif _night_charge_needed %}{{ _night_charge_time }}
+        {% elif kand | count > 0 %}{{ (kand | min).isoformat() }}
         {% elif _hours_until_min_temp | float < 168 %}{{ (now() + timedelta(hours=_hours_until_min_temp | float)).isoformat() }}
         {% else %}{{ (now() + timedelta(days=7)).isoformat() }}{% endif %}
 
@@ -373,50 +693,152 @@ action:
         ⛔ Anlage auf „{{ _plant_state | trim }}" – Laden nur bei {{ plant_state_allowed }}
         {%- elif _should_charge_emergency and _should_charge -%}
         🚨 Notfall-Ladung läuft ({{ _water_temp | round(1) }}°C ≤ {{ (min_temperature | float - 3) | round(0) }}°C)
+        {%- elif _should_charge_evening and _should_charge -%}
+        ⚡ Abendladung läuft ({{ _mode_label | trim }})
         {%- elif _should_charge -%}
         ⚡ Nachtladung läuft (kältester Punkt {{ _night_charge_temp }}°C)
+        {%- elif _cmd_wiederholen -%}
+        ↻ Befehl unquittiert – Wiederholung ({{ _minutes_since_last }} von {{ command_retry_window }} min)
         {%- elif not _charge_interval_ok -%}
         ⏲️ Sperrzeit – nächste Ladung frühestens in {{ min_charge_interval | int - _minutes_since_last | int }} min
         {%- elif _water_temp | float >= prediction_activation_threshold | float -%}
         ✅ Wasser warm genug ({{ _water_temp | round(1) }}°C ≥ {{ prediction_activation_threshold }}°C Schwelle)
-        {%- elif not _night_charge_needed -%}
-        ✅ Vorrat reicht: Mo→{{ _predicted_morning_temp | round(1) }}°C, Ab→{{ _predicted_evening_temp | round(1) }}°C
-        {%- elif as_datetime(_night_charge_time) > now() -%}
+        {%- elif not _night_charge_needed and not _evening_charge_needed -%}
+        ✅ Vorrat reicht: Mo→{{ _predicted_morning_temp | round(1) }}°C, Ab→{{ _predicted_evening_temp | round(1) }}°C ({{ _mode_label | trim }})
+        {%- elif _evening_charge_needed and as_datetime(_evening_charge_time) > now()
+               and (not _night_charge_needed or as_datetime(_evening_charge_time) < as_datetime(_night_charge_time)) -%}
+        🌆 Abendladung geplant {{ as_local(as_datetime(_evening_charge_time)).strftime('%d.%m %H:%M') }} ({{ _mode_label | trim }})
+        {%- elif _night_charge_needed and as_datetime(_night_charge_time) > now() -%}
         🌙 Nachtladung geplant {{ as_local(as_datetime(_night_charge_time)).strftime('%d.%m %H:%M') }} (kältester Punkt {{ _night_charge_temp }}°C)
-        {%- elif now() > as_datetime(_window_end) -%}
+        {%- elif _night_charge_needed and now() > as_datetime(_window_end) -%}
         ⏰ Nachtfenster verpasst – warte auf Notfall-Boden
         {%- else -%}
         … bereit, lädt beim nächsten Lauf
         {%- endif -%}
 
-  # --- Laden wenn nötig ---
-  - if: "{{ _should_charge }}"
+  # --- Modbus: laufende Ladung beenden / verwaistes Fenster aufraeumen ---
+  - variables:
+      _modbus: "{{ control_mode == 'modbus' and modbus_control_select not in ['', None] and modbus_setpoint_entity not in ['', None] }}"
+      _modbus_aktiv: "{{ _modbus and states(modbus_control_select) == modbus_control_option }}"
+      _modbus_fertig: >
+        {{ _modbus_aktiv and _water_valid and (
+             _water_temp | float >= (modbus_target | float) - 0.5
+             or _minutes_since_last | int >= modbus_max_minutes | int) }}
+      # Fenster steht noch auf den Ladewerten, obwohl keine Ladung laeuft
+      # (z. B. Regelung von Hand zurueckgesetzt). Nur die exakten Ladewerte
+      # gelten als "von uns" - andere Handeinstellungen bleiben unangetastet.
+      _modbus_verwaist: >
+        {{ _modbus and not _modbus_aktiv
+           and modbus_desired_entity not in ['', None] and modbus_reload_entity not in ['', None]
+           and states(modbus_desired_entity) | float(-1) == modbus_charge_desired | float
+           and states(modbus_reload_entity) | float(-1) == modbus_charge_reload | float }}
+  - if: "{{ _modbus_fertig }}"
     then:
-      - choose:
-          - conditions: "{{ extra_charge_service.split('.')[0] == 'button' }}"
-            sequence:
-              - service: button.press
+      - service: select.select_option
+        target:
+          entity_id: "{{ modbus_control_select }}"
+        data:
+          option: "{{ modbus_end_option }}"
+      - if: "{{ modbus_desired_entity not in ['', None] }}"
+        then:
+          - service: number.set_value
+            target:
+              entity_id: "{{ modbus_desired_entity }}"
+            data:
+              value: "{{ modbus_restore_desired }}"
+      - if: "{{ modbus_reload_entity not in ['', None] }}"
+        then:
+          - service: number.set_value
+            target:
+              entity_id: "{{ modbus_reload_entity }}"
+            data:
+              value: "{{ modbus_restore_reload }}"
+      - service: input_boolean.turn_off
+        target:
+          entity_id: input_boolean.brauchwasser_befehl_offen
+      - service: logbook.log
+        data:
+          name: "Froeling Extraladen"
+          message: >
+            Modbus-Ladung beendet: Wassertemp={{ _water_temp }}°C,
+            Ziel={{ modbus_target }}°C, MinutenSeitBefehl={{ _minutes_since_last }};
+            Regelung zurueck an {{ modbus_end_option }}, Fenster
+            {{ modbus_restore_desired }}/{{ modbus_restore_reload }}.
+  - if: "{{ _modbus_verwaist }}"
+    then:
+      - service: number.set_value
+        target:
+          entity_id: "{{ modbus_desired_entity }}"
+        data:
+          value: "{{ modbus_restore_desired }}"
+      - service: number.set_value
+        target:
+          entity_id: "{{ modbus_reload_entity }}"
+        data:
+          value: "{{ modbus_restore_reload }}"
+      - service: logbook.log
+        data:
+          name: "Froeling Extraladen"
+          message: >
+            Modbus-Fenster ohne laufende Ladung auf {{ modbus_charge_desired }}/{{ modbus_charge_reload }}
+            vorgefunden, zurueck auf {{ modbus_restore_desired }}/{{ modbus_restore_reload }}.
+
+  # --- Laden wenn nötig ---
+  - if: "{{ _should_charge and not _modbus_aktiv }}"
+    then:
+      - if: "{{ _modbus }}"
+        then:
+          # Reihenfolge: Sollwert, dann Fenster, zuletzt die Regelung uebernehmen.
+          - service: number.set_value
+            target:
+              entity_id: "{{ modbus_setpoint_entity }}"
+            data:
+              value: "{{ modbus_target }}"
+          - if: "{{ modbus_desired_entity not in ['', None] }}"
+            then:
+              - service: number.set_value
                 target:
-                  entity_id: "{{ extra_charge_service }}"
-          - conditions: "{{ extra_charge_service.split('.')[0] == 'switch' }}"
-            sequence:
-              - service: switch.turn_on
-                target:
-                  entity_id: "{{ extra_charge_service }}"
-          - conditions: "{{ extra_charge_service.split('.')[0] == 'select' }}"
-            sequence:
-              - service: select.select_option
-                target:
-                  entity_id: "{{ extra_charge_service }}"
+                  entity_id: "{{ modbus_desired_entity }}"
                 data:
-                  option: "{{ extra_charge_select_option }}"
-          - conditions: "{{ extra_charge_service.split('.')[0] == 'water_heater' }}"
-            sequence:
-              - service: water_heater.set_operation_mode
+                  value: "{{ modbus_charge_desired }}"
+          - if: "{{ modbus_reload_entity not in ['', None] }}"
+            then:
+              - service: number.set_value
                 target:
-                  entity_id: "{{ extra_charge_service }}"
+                  entity_id: "{{ modbus_reload_entity }}"
                 data:
-                  operation_mode: "boost"
+                  value: "{{ modbus_charge_reload }}"
+          - service: select.select_option
+            target:
+              entity_id: "{{ modbus_control_select }}"
+            data:
+              option: "{{ modbus_control_option }}"
+        else:
+          - choose:
+              - conditions: "{{ (extra_charge_service or '').split('.')[0] == 'button' }}"
+                sequence:
+                  - service: button.press
+                    target:
+                      entity_id: "{{ extra_charge_service }}"
+              - conditions: "{{ (extra_charge_service or '').split('.')[0] == 'switch' }}"
+                sequence:
+                  - service: switch.turn_on
+                    target:
+                      entity_id: "{{ extra_charge_service }}"
+              - conditions: "{{ (extra_charge_service or '').split('.')[0] == 'select' }}"
+                sequence:
+                  - service: select.select_option
+                    target:
+                      entity_id: "{{ extra_charge_service }}"
+                    data:
+                      option: "{{ extra_charge_select_option }}"
+              - conditions: "{{ (extra_charge_service or '').split('.')[0] == 'water_heater' }}"
+                sequence:
+                  - service: water_heater.set_operation_mode
+                    target:
+                      entity_id: "{{ extra_charge_service }}"
+                    data:
+                      operation_mode: "boost"
 
       - service: logbook.log
         data:
@@ -426,6 +848,10 @@ action:
             Wassertemp={{ _water_temp }}°C,
             Notfall={{ _should_charge_emergency }},
             Nachtladung={{ _should_charge_night }},
+            Abendladung={{ _should_charge_evening }},
+            Betriebsart={{ 'Ereignis' if _event_mode else 'Sommer' }},
+            AussenMittel={{ _outdoor_mean }}°C ({{ _outdoor_source | trim }}),
+            Ansteuerung={{ 'modbus' if _modbus else 'cloud' }},
             VorhersageMorgen={{ _predicted_morning_temp }}°C,
             VorhersageAbend={{ _predicted_evening_temp }}°C,
             kältesterPunkt={{ _night_charge_temp }}°C,
@@ -446,6 +872,16 @@ action:
         target:
           entity_id: input_boolean.brauchwasser_befehl_offen
 
+      # Grundlage der Quittierung: Wassertemperatur und Kesselzustand beim Absetzen.
+      # Bei einer Wiederholung bleibt die Baseline des ersten Versuchs stehen.
+      - if: "{{ _cmd_neu }}"
+        then:
+          - service: input_text.set_value
+            target:
+              entity_id: input_text.brauchwasser_befehl_basis
+            data:
+              value: "{{ _water_temp }}|{{ 0 if _kessel_laeuft else 1 }}"
+
       # Vorbelegung fuer den Fall, dass der Kessel bereits laeuft und deshalb
       # kein neuer Kesselstart ("Vorbereitung") folgt.
       - service: input_text.set_value
@@ -453,6 +889,36 @@ action:
           entity_id: input_text.brauchwasser_startquelle
         data:
           value: "Automation"
+
+  # --- Aufgeben: melden und die Sperrzeit freigeben ---
+  - if: "{{ _cmd_aufgeben }}"
+    then:
+      - service: logbook.log
+        data:
+          name: "Froeling Extraladen"
+          message: >
+            KEINE Reaktion der Anlage, {{ _minutes_since_last }} min nach dem Befehl
+            (Wiederholfenster {{ command_retry_window }} min). Kessel={{
+            states(boiler_state_sensor) if boiler_state_sensor not in ['', None] else '-' }},
+            Wasser={{ _water_temp }}°C (beim Befehl {{ _cmd_wasser }}°C). Sperrzeit freigegeben.
+      - if: "{{ notify_service not in ['', None] }}"
+        then:
+          - service: "{{ notify_service }}"
+            data:
+              title: "Brauchwasser: Anlage reagiert nicht"
+              message: >
+                Extraladen-Befehle ohne Reaktion seit {{ _minutes_since_last }} min, Wasser {{ _water_temp }}°C.
+                Kessel: {{ states(boiler_state_sensor) if boiler_state_sensor not in ['', None] else '-' }}.
+      - service: input_boolean.turn_off
+        target:
+          entity_id: input_boolean.brauchwasser_befehl_offen
+      # Sperrzeit auf eine Stunde zusammenziehen: nicht weiter im 10-Minuten-Takt
+      # haemmern, aber auch nicht sechs Stunden stillstehen (Notfall-Boden!).
+      - service: input_datetime.set_datetime
+        target:
+          entity_id: input_datetime.letzter_brauchwasser_befehl
+        data:
+          datetime: "{{ (now() - timedelta(minutes=[min_charge_interval | int - 60, 0] | max)).isoformat() }}"
 
   # --- Status-Einzeiler (wenn konfiguriert) ---
   - if: "{{ status_sensor not in ['', None] }}"

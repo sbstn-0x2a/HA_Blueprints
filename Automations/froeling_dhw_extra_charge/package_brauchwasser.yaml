@@ -6,6 +6,8 @@
 #   input_datetime.letzte_brauchwasser_ladung   <- schreibt die Automation unten,
 #       und zwar nur bei echtem Temperaturanstieg im Boiler. Egal ob Automation,
 #       Handauslösung am Kessel/in HA oder Pufferladung die Ursache war.
+#   input_text.brauchwasser_befehl_basis         <- seit 01.10.2026 (Blueprint v0.11):
+#       Grundlage der Quittierung, schreibt die BLUEPRINT beim Absetzen eines Befehls.
 #
 # Anlass: Am 06.09.2026 setzte die Blueprint um 02:00 den Zeitstempel, die Ladung
 # brach aber zweimal mit STÖRUNG ab (Boiler kam nur auf 46 bzw. 50 °C). Die volle
@@ -32,6 +34,12 @@ input_text:
     name: Brauchwasser Startquelle
     max: 60
     icon: mdi:account-question
+  # Grundlage der Quittierung (Blueprint v0.11): "<Wassertemperatur>|<1 = Kessel ruhte>".
+  # Wird beim Absetzen eines Befehls geschrieben und danach nur gelesen.
+  brauchwasser_befehl_basis:
+    name: Brauchwasser Befehl-Grundlage
+    max: 32
+    icon: mdi:content-save-check-outline
 
 input_datetime:
   # ---------------------------------------------------------------------------

@@ -18,11 +18,20 @@ Alle 10 Minuten rechnet das Blueprint die Speichertemperatur mit dem newtonschen
 **Zeitpunkt nach Wettervorhersage**
 Die Ladung wird auf den **kältesten Stundenwert** der Nacht gelegt (geringstes Kondensatrisiko im Schornstein), aber so früh, dass sie `charge_duration_hours` vor der Morgenzeit fertig ist. Die Außentemperatur entscheidet also *wann*, niemals *ob* — sie ist Timing-Optimierer, kein Lade-Gate.
 
+**Ereignisbetrieb bei Kälte**
+Unter einer Außentemperatur-Schwelle (`event_mode_threshold`, Standard 15 °C Tagesmittel) bekommt jede Engstelle ihre eigene Ladung. Ein Engpass am Morgen wird weiterhin nachts geladen; ein Engpass nur am Abend wird am Nachmittag geladen (`evening_ready_time − charge_duration_hours`) statt schon in der Nacht davor. Über der Schwelle deckt eine Nachtladung Morgen und Abend ab. Das Tagesmittel stammt aus den nächsten 24 h der Wettervorhersage, mit optionalem Rückfall-Sensor.
+
 **Notfall-Boden**
 Unter `min_temperature − 3 °C` wird jederzeit geladen, auch tagsüber. Das ist ein Sicherheitsnetz und sollte selten zünden.
 
 **Harte Sperre über den Anlagenzustand**
 Steht die Anlage nicht in einem der erlaubten Zustände, wird überhaupt kein Befehl geschickt — der Notfall-Boden eingeschlossen.
+
+**Quittierte Befehle**
+Ein Befehl zählt erst, wenn der Kessel reagiert: Entweder verlässt der Kesselzustand den Ruhezustand, oder die Wassertemperatur steigt über den Wert, der beim Absetzen gemerkt wurde. Bis dahin wird der Befehl bei jedem Lauf innerhalb von `command_retry_window` (Standard 30 min) wiederholt. Bleibt auch der letzte Versuch unquittiert, schreibt das Blueprint einen Logbucheintrag, schickt optional eine Push-Meldung und verkürzt die Sperrzeit auf eine weitere Stunde, damit der nächste reguläre Anlass (z. B. der Notfall-Boden) bald wieder greift.
+
+**Ansteuerung über Cloud oder Modbus**
+`control_mode: cloud` löst die Extraladung über eine Entität der Fröling-Cloud-Integration aus. `control_mode: modbus` nutzt stattdessen die Kesselfernsteuerung der [Fröling-S3200-Modbus-Integration](https://github.com/sbstn-0x2a/ha_froeling_modbus): Für die Dauer der Ladung hebt sie den Boiler-Sollwert an und verengt das Nachladefenster, danach stellt sie die ursprünglichen Werte wieder her.
 
 ---
 
@@ -44,6 +53,8 @@ Deshalb gibt es **zwei getrennte Zeitstempel**:
 | `input_datetime.letzter_brauchwasser_befehl` | das Blueprint | wann ein Befehl abgesetzt wurde — steuert nur die Sperrzeit |
 | `input_datetime.letzte_brauchwasser_ladung` | die Erfassungs-Automation | wann das Wasser tatsächlich wärmer wurde, egal woher |
 
+Seit v0.11 geht das Blueprint noch einen Schritt weiter und prüft, ob ein Befehl überhaupt *angekommen* ist. In der Praxis kann die Integration einen Befehl ohne jeden Fehler annehmen, und er erreicht den Kessel trotzdem nie. Ohne Quittierung liefe die 6-Stunden-Sperrzeit dann gegen einen verlorenen Befehl — der Notfall-Boden eingeschlossen. Die Sperrzeit beginnt deshalb erst mit der Quittierung (siehe *Quittierte Befehle* oben). Die dafür nötigen Werte stehen in `input_text.brauchwasser_befehl_basis`.
+
 ---
 
 ## Zwei Bestandteile
@@ -61,11 +72,14 @@ Deshalb gibt es **zwei getrennte Zeitstempel**:
 
 - **Kessel:** Fröling-Pelletkessel mit einer HA-Integration, die folgendes bereitstellt:
   - einen Temperatursensor für den Speicher oben
-  - eine Entität, die die Extraladung auslöst (`button`, `switch`, `water_heater` oder `select`)
-  - einen Kesselzustands-Sensor (für die Erkennung von Brennerstarts)
+  - eine Entität, die die Extraladung auslöst (`button`, `switch`, `water_heater` oder `select`) — für `control_mode: cloud`
+  - oder die Fernsteuerungs-Entitäten der [Fröling-S3200-Modbus-Integration](https://github.com/sbstn-0x2a/ha_froeling_modbus) (ab 0.6.0) — für `control_mode: modbus`
+  - einen Kesselzustands-Sensor (für die Erkennung von Brennerstarts und die Quittierung von Befehlen)
   - einen Anlagenzustands-Sensor (für die Sperre)
 - **Umgebungssensor:** ein Temperaturfühler im Heizungsraum — wird ausschließlich für das Abkühlmodell benutzt
 - **Wetter (optional):** eine `weather`-Entität mit stündlicher Vorhersage über `weather.get_forecasts` (z. B. DWD). Leer lassen heißt: Ladung zum spätestmöglichen Zeitpunkt.
+- **Außenmittel (optional):** Rückfall für den Ereignisbetrieb, falls die Vorhersage fehlt, z. B. ein Statistik-Helfer (Mittelwert, maximales Alter 24 h) auf dem Außenfühler.
+- **Benachrichtigung (optional):** ein `notify`-Dienst für die Meldung „Befehl nicht quittiert“.
 - **Packages aktiviert** in der `configuration.yaml`:
   ```yaml
   homeassistant:
@@ -91,6 +105,8 @@ Deshalb gibt es **zwei getrennte Zeitstempel**:
 
    Prüfe außerdem die beiden Zustandsnamen: `"Vorbereitung"` (der Kesselzustand, der einen Brennerstart markiert) und `"Extraladen"` (die Option der Extraladung). Beide hängen von der Sprache deiner Integration ab.
 
+   Das Blueprint selbst schreibt in `input_datetime.letzter_brauchwasser_befehl`, `input_text.brauchwasser_befehl_basis` und `input_text.brauchwasser_startquelle` — alle drei sind im Package definiert.
+
 4. **Auf Helfer-Kollision achten.** Das Package definiert `input_datetime.letzte_brauchwasser_ladung` und `input_text.grund_brauchwasser_ladung`. Wenn du die beiden schon als UI-Helfer hast, lösche sie dort oder kommentiere die Einträge aus — sonst kollidieren die Entity-IDs. Ein Kommentarblock in der Datei markiert die Stelle.
 
 5. **Home Assistant neu starten.** Ein YAML-Reload genügt nicht, weil das Package neue Helfer-Entitäten anlegt.
@@ -108,8 +124,19 @@ Deshalb gibt es **zwei getrennte Zeitstempel**:
 | `water_temperature_sensor` | Speichertemperatur oben | — |
 | `outdoor_temperature_sensor` | Umgebungstemperatur am Speicher — nur Abkühlmodell, nie ein Gate | — |
 | `weather_forecast_entity` | Wetter-Entität mit stündlicher Vorhersage; leer = Ladung zum spätestmöglichen Zeitpunkt | *(keine)* |
-| `extra_charge_service` | Entität, die die Extraladung auslöst | — |
+| `outdoor_mean_sensor` | Rückfall für das Außen-Tagesmittel, falls die Vorhersage fehlt | *(keiner)* |
+| `event_mode_threshold` | Unter diesem Tagesmittel bekommt jede Engstelle ihre eigene Ladung (°C) | `15` |
+| `control_mode` | `cloud` (Extraladen-Entität) oder `modbus` (Kesselfernsteuerung) | `cloud` |
+| `extra_charge_service` | Entität, die die Extraladung auslöst — nur `cloud` | *(keine)* |
 | `extra_charge_select_option` | Zu wählende Option, wenn die Entität ein `select` ist | `Extraladen` |
+| `modbus_control_select` | Select „Regelung“ der Fernsteuerung — nur `modbus` | *(keiner)* |
+| `modbus_control_option` / `modbus_end_option` | Option während / nach der Ladung | `home_assistant` / `kessel` |
+| `modbus_setpoint_entity` | Boiler-Solltemperatur der Fernsteuerung (Register 48019) | *(keine)* |
+| `modbus_target` | Boiler-Soll für die Ladung; die Anlage stoppt genau hier, max. 65 (°C) | `65` |
+| `modbus_desired_entity` / `modbus_reload_entity` | Anlagenwerte „Gewünschte Boilertemperatur“ (41632) und „Nachladen, wenn unter“ (41633) | *(keine)* |
+| `modbus_charge_desired` / `modbus_charge_reload` | Werte während der Ladung (°C) | `50` / `45` |
+| `modbus_restore_desired` / `modbus_restore_reload` | Werte nach der Ladung (°C) | `65` / `35` |
+| `modbus_max_minutes` | Spätestens nach so vielen Minuten geht die Regelung zurück an die Anlage | `180` |
 | `min_temperature` | Mindesttemperatur zu den Zielzeiten (°C) | `45` |
 | `morning_ready_time` | Wann das Wasser morgens warm sein muss | `05:00` |
 | `evening_ready_time` | Wann das Wasser abends warm sein muss | `18:00` |
@@ -118,6 +145,10 @@ Deshalb gibt es **zwei getrennte Zeitstempel**:
 | `min_charge_interval` | Sperrzeit zwischen zwei Befehlen (min) | `360` |
 | `prediction_activation_threshold` | Vorhersage wird erst unter dieser Speichertemperatur aktiv (°C) | `52` |
 | `heat_loss_coefficient` | Abkühlrate `k` im Newton-Modell (1/h) | `0.011` |
+| `boiler_state_sensor` | Kesselzustand für die Quittierung; leer = Quittierung nur über die Wassertemperatur | *(keiner)* |
+| `boiler_idle_state` | Kommaliste der Zustände „Kessel tut nichts“ | `Betriebsbereit, Tür offen` |
+| `command_retry_window` | So lange wird ein unquittierter Befehl wiederholt (min) | `30` |
+| `notify_service` | `notify`-Dienst für die Meldung „nicht quittiert“, z. B. `notify.mobile_app_handy` | *(keiner)* |
 | `plant_state_sensor` | Anlagenzustands-Entität; leer schaltet die Sperre ab | *(keine)* |
 | `plant_state_allowed` | Kommaliste der Zustände, in denen geladen werden darf | `Brauchwasser` |
 | `status_sensor` | `input_text` für den Status-Einzeiler | *(keiner)* |
@@ -166,7 +197,9 @@ Das 5-Minuten-Fenster ist großzügig: Über 8 Ladungen gemessen lag der Verzug 
 - Läuft alle 10 Minuten, `mode: single`, `max_exceeded: silent`.
 - **Winterbetrieb:** Wenn deine Anlage für die kalte Jahreszeit auf einen Heizmodus umgestellt wird, legt `plant_state_allowed: Brauchwasser` die Automation vollständig still. Dann den Heizzustand mit aufnehmen, z. B. `Brauchwasser, Automatik`.
 - Der Status-Einzeiler ist durch `input_text` auf 255 Zeichen begrenzt.
-- Das Blueprint liest den Kesselzustand nicht selbst — Brennerstarts werden nur in der Package-Automation ausgewertet.
+- Brennerstarts und ihre Quelle wertet nur die Package-Automation aus. Das Blueprint liest den Kesselzustand ausschließlich, um die eigenen Befehle zu quittieren.
+- **Modbus-Betrieb:** Die Kesselfernsteuerung wirkt auf alle Heizkreise zugleich. Im Anlagenzustand `Brauchwasser` ist das neutral; wer zusätzlich `Automatik` freigibt, gibt die Heizkreisregelung für die Dauer der Ladung an Home Assistant ab.
+- Nach einer Änderung an der Blueprint-Datei `homeassistant.reload_all` ausführen — ein Reload der Automationen leert den Blueprint-Cache nicht.
 
 ---
 

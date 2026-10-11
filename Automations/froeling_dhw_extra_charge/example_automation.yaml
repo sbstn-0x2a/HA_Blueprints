@@ -8,11 +8,11 @@
 # Create automation > Use a blueprint). This block shows what the result looks like
 # and serves as a template for the input values.
 #
-# Die Entity-IDs stammen aus der Ursprungsinstallation und müssen angepasst werden.
-# The entity IDs come from the original installation and need to be adjusted.
+# Die Entity-IDs sind Beispiele und müssen angepasst werden.
+# The entity IDs are examples and need to be adjusted.
 
 - id: '1700000000000'
-  alias: Intelligente Brauchwasser-Steuerung via Fröling Extraladen v0.9
+  alias: Intelligente Brauchwasser-Steuerung via Fröling Extraladen v0.11
   description: ''
   use_blueprint:
     path: froeling/froeling_dhw_extra_charge.yaml
@@ -20,7 +20,17 @@
       water_temperature_sensor: sensor.boiler_1_temperatur_oben
       outdoor_temperature_sensor: sensor.temperatur_heizungsraum
       weather_forecast_entity: weather.forecast_home
+      outdoor_mean_sensor: sensor.aussentemperatur_mittel_24_h
+      event_mode_threshold: 15
+      control_mode: cloud
       extra_charge_service: select.12345_boiler_01_mode
+      # Nur für control_mode: modbus / only for control_mode: modbus
+      modbus_control_select: select.froeling_fernsteuerung_regelung
+      modbus_setpoint_entity: number.froeling_fernsteuerung_boiler_1_solltemperatur_modbus
+      modbus_desired_entity: number.froeling_boiler01_gewuenschte_boilertemperatur
+      modbus_reload_entity: number.froeling_boiler01_nachladen_wenn_boilertemperatur_unter
+      boiler_state_sensor: sensor.froeling_kessel_kesselzustand
+      notify_service: notify.mobile_app_handy
       plant_state_sensor: sensor.anlagenzustand
       plant_state_allowed: Brauchwasser
       heat_loss_coefficient: 0.011
