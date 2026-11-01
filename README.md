@@ -15,6 +15,12 @@ Home Assistant blueprints, packages and integration setups from my own installat
 |---|---|
 | [comfee_dehumidifier](Integrations/comfee_dehumidifier/README.md) | Comfee CDDKE-16DEN7 (EU) dehumidifier via Midea AC LAN, with device timer add-on and dashboard card ([Deutsch](Integrations/comfee_dehumidifier/README.de.md)) |
 
+## Frontend
+
+| Folder | Description |
+|---|---|
+| [energy_dashboard_wording](Frontend/energy_dashboard_wording/README.md) | Replace "Gas" and other fixed texts on the energy dashboard, for example for wood and pellets ([Deutsch](Frontend/energy_dashboard_wording/README.de.md)) |
+
 ## License
 
 MIT License — see [LICENSE](LICENSE).
