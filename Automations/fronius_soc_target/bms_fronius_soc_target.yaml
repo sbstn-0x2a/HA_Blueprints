@@ -100,35 +100,48 @@ blueprint:
         entity:
           domain: binary_sensor
 
+    evcc_battery_mode_sensor:
+      name: evcc-Batteriemodus (Sensor, optional)
+      description: >
+        evcc-Sensor mit dem aktuellen Batteriemodus (z.B. sensor.evcc_battery_mode_value).
+        Solange evcc den Akku selbst steuert (entladen sperren / laden / laden sperren),
+        setzt diese Automation komplett aus. Sonst schreibt sie alle 5 Minuten "Auto" auf
+        die Speichersteuerung und hebt damit die evcc-Sperre beim Schnell- und Planladen auf
+        (belegt 12.10. und 14.10.2026). Leer lassen, wenn kein evcc vorhanden.
+      default: ""
+      selector:
+        entity:
+          domain: sensor
+
     option_on_load:
       name: Modus bei aktivem Laden
-      default: "PV Charge Limit"
+      default: "pv_charge_limit"
       selector:
         select:
           options:
-            - "Auto"
-            - "PV Charge Limit"
-            - "Discharge Limit"
-            - "PV Charge and Discharge Limit"
-            - "Charge from Grid"
-            - "Discharge to Grid"
-            - "Block Discharging"
-            - "Block Charging"
+            - "auto"
+            - "pv_charge_limit"
+            - "discharge_limit"
+            - "pv_charge_and_discharge_limit"
+            - "charge_from_grid"
+            - "discharge_to_grid"
+            - "block_discharging"
+            - "block_charging"
 
     option_off_load:
       name: Modus bei inaktivem Laden (Auto)
-      default: "Auto"
+      default: "auto"
       selector:
         select:
           options:
-            - "Auto"
-            - "PV Charge Limit"
-            - "Discharge Limit"
-            - "PV Charge and Discharge Limit"
-            - "Charge from Grid"
-            - "Discharge to Grid"
-            - "Block Discharging"
-            - "Block Charging"
+            - "auto"
+            - "pv_charge_limit"
+            - "discharge_limit"
+            - "pv_charge_and_discharge_limit"
+            - "charge_from_grid"
+            - "discharge_to_grid"
+            - "block_discharging"
+            - "block_charging"
 
     battery_capacity_kwh:
       name: Akku-Kapazität (kWh)
@@ -355,6 +368,16 @@ action:
       guard_peak_sensor: !input peak_time_sensor
   - condition: template
     value_template: "{{ as_datetime(states(guard_peak_sensor)) is not none }}"
+  # evcc hat Vorrang: Solange evcc den Akku sperrt oder laedt, nichts schreiben.
+  # Jeder Lauf stellt sonst den Select (mindestens auf "Auto") und loescht damit
+  # die Modbus-Vorgabe von evcc, das seinen Modus nur beim Wechsel schreibt.
+  # Rohwerte und deutsche Uebersetzung der evcc_intg-Zustaende abgedeckt.
+  - variables:
+      guard_evcc_mode: !input evcc_battery_mode_sensor
+  - condition: template
+    value_template: >
+      {{ guard_evcc_mode == '' or states(guard_evcc_mode) | lower not in
+         ['hold', 'charge', 'holdcharge', 'entladen sperren', 'laden', 'laden sperren'] }}
   - variables:
       # Input-Aliase
       peak_sensor: !input peak_time_sensor

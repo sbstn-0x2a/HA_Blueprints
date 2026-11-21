@@ -2,7 +2,9 @@
 
 A Home Assistant Blueprint for dynamic solar battery charge management — optimized for systems with a **Fronius inverter**, **BYD Battery Box**, and **Open-Meteo solar forecast**.
 
-**Current version: v2** — two field-measured defects of v1 are fixed, see [What v2 changes](#what-v2-changes). It needs one additional helper.
+**Current version: v2** — two defects of v1 are fixed, see [What v2 changes](#what-v2-changes). It needs one additional helper.
+
+**Update 2026-11-21:** adapted to [`fronius_modbus`](https://github.com/callifo/fronius_modbus) **1.4.0**, which turned the mode names into keys (`Auto` → `auto`). Existing automations need one manual step, see [Upgrading to fronius_modbus 1.4](#upgrading-to-fronius_modbus-14).
 
 🇩🇪 [Deutsche Version](/Automations/fronius_soc_target/README.de.md)
 
@@ -39,26 +41,38 @@ If post-peak solar yield is not sufficient to charge the battery from `target_so
 
 v1 had two defects that only showed up in operation:
 
-**1. The ramp collapsed to zero.** The last commanded charge power was read back from the BMS charge limit `number`. That entity only exists in `PV Charge Limit` mode — in `Auto` it is `unavailable`, and `float(0)` turned it into a hard 0 W. The ramp restarted from scratch (observed three times within 40 minutes on 2026-07-18). v2 keeps its own memory in an `input_number` and writes the setpoint there **before** touching the number.
+**1. The ramp collapsed to zero.** The last commanded charge power was read back from the BMS charge limit `number`. That entity only exists in `PV Charge Limit` mode — in `Auto` it is `unavailable`, and `float(0)` turned it into a hard 0 W. The ramp restarted from scratch. v2 keeps its own memory in an `input_number` and writes the setpoint there **before** touching the number.
 
 **2. Random branch selection.** The grid power was read as an instantaneous value from a meter that swings by kilowatts from second to second, so the up/down decision was close to a coin flip. The fix is not in the blueprint: feed it a **smoothed** grid sensor (a 5-minute mean via the Statistics integration) instead of the raw one.
 
-A third fix guards against the peak time sensor being `unknown` while the solar forecast reloads — `as_datetime(None)` raised an `AttributeError` and discarded the whole control cycle (10 times on 2026-08-30). Such a cycle is now skipped silently; the next tick takes over.
+A third fix guards against the peak time sensor being `unknown` while the solar forecast reloads — `as_datetime(None)` raised an `AttributeError` and discarded the whole control cycle. Such a cycle is now skipped silently; the next tick takes over.
 
-**Forecast gates with hysteresis (2026-09-17).** The automation only controls charging while the daily forecast and the peak-hour energy are above their thresholds. Open-Meteo recalculates the forecast every three hours, and on days close to a threshold a single update switched the control off in the middle of the morning — `Auto` mode, no charge limit, the battery charged at full power. In September 2026 this happened on 5 of 17 days for the peak hour and on 3 for the daily forecast; the forecasted peak hour moved by a median of 0.58 kWh within a day. Both gates now have an optional hysteresis: enable at the threshold, disable only below *threshold − hysteresis*. An `input_boolean` remembers whether the gate is open and is reset outside the control window, so every day starts at the enable threshold. With hysteresis `0` (the default) the behaviour is unchanged.
+**Forecast gates with hysteresis (2026-09-17).** The automation only controls charging while the daily forecast and the peak-hour energy are above their thresholds. Open-Meteo recalculates the forecast every three hours, and on days close to a threshold a single update switched the control off in the middle of the morning — `Auto` mode, no charge limit, the battery charged at full power. Both gates now have an optional hysteresis: enable at the threshold, disable only below *threshold − hysteresis*. An `input_boolean` remembers whether the gate is open and is reset outside the control window, so every day starts at the enable threshold. With hysteresis `0` (the default) the behaviour is unchanged.
+
+**evcc takes precedence (2026-10).** evcc writes its battery mode via Modbus only when that mode changes. Every cycle of this automation set the mode select — at least to `auto` — and so lifted evcc's discharge lock during fast and planned EV charging. With the optional `evcc_battery_mode_sensor` the automation now pauses completely while evcc controls the battery (`hold`, `charge`, `holdcharge` and their German translations in ha-evcc).
+
+---
+
+## Upgrading to fronius_modbus 1.4
+
+`fronius_modbus` 1.4.0 (2026-11-16) reports enum states as keys: `Auto` became `auto`, `PV Charge Limit` became `pv_charge_limit`, and so on. The blueprint now offers these keys for `option_on_load` and `option_off_load`.
+
+Existing automations keep the old values they stored. After updating the blueprint, open the automation, select both modes again and save. Otherwise `select.select_option` is called with an option that no longer exists, and the battery is not controlled.
+
+Still on `fronius_modbus` 0.3.x? Keep the [previous blueprint version](https://github.com/sbstn-0x2a/HA_Blueprints/blob/6fb0d5c/Automations/fronius_soc_target/bms_fronius_soc_target.yaml).
 
 ---
 
 ## Requirements
 
-- **Inverter:** Fronius (with BMS control via Modbus via [`fronius_modbus`](https://github.com/callifo/fronius_modbus) HACS integration — use the [@callifo](https://github.com/callifo) fork, it is actively maintained)
+- **Inverter:** Fronius (with BMS control via Modbus via [`fronius_modbus`](https://github.com/callifo/fronius_modbus) HACS integration **1.4.0 or newer** — use the [@callifo](https://github.com/callifo) fork, it is actively maintained)
 - **Battery:** BYD Battery Box Premium HV (or compatible BMS with `select` mode control and `number` charge limit entity)
 - **Solar Forecast:** [Open-Meteo Solar Forecast](https://github.com/flowolf/ha-open-meteo-solar-forecast) HACS integration with `wh_period` attribute and a *remaining* sensor
 - **Grid Meter:** Any energy meter with signed grid power (negative = feed-in), e.g. Shelly Pro 3EM
 - **Helper (required):** one `input_number` as the memory for the last commanded charge power — see `package_bms_soc_target.yaml`
 - **Helper (optional):** one `input_boolean` as the gate memory, only needed for the forecast hysteresis — also in `package_bms_soc_target.yaml`
 - **Smoothed grid sensor (strongly recommended):** a 5-minute mean of the grid power, created via **Settings → Devices & Services → Helpers → Statistics**. Pass that sensor as `grid_power_sensor` instead of the raw meter.
-- **EV Charging (optional):** [evcc](https://evcc.io/) with [ha-evcc](https://github.com/marq24/ha-evcc) HACS integration with binary `connected` sensors per charger
+- **EV Charging (optional):** [evcc](https://evcc.io/) with [ha-evcc](https://github.com/marq24/ha-evcc) HACS integration with binary `connected` sensors per charger and, optionally, the battery mode sensor
 
 ---
 
@@ -76,8 +90,9 @@ A third fix guards against the peak time sensor being `unknown` while the solar 
 | Charge limit entity (`charge_limit_number`) | Number entity for BMS charge power setpoint (W) | — |
 | Last command memory (`last_cmd_helper`) | `input_number` storing the last commanded charge power — v2, prevents the ramp from resetting | — |
 | EV connected sensor (`ev_connected_sensor_1/2`) | Optional: EVCC binary sensor per charger — automation is inactive while an EV is connected | *(none)* |
-| Mode when charging (`option_on_load`) | BMS mode while the automation is actively controlling charge | `PV Charge Limit` |
-| Mode when inactive (`option_off_load`) | BMS mode when the automation is not intervening | `Auto` |
+| evcc battery mode (`evcc_battery_mode_sensor`) | Optional: evcc sensor with the current battery mode (e.g. `sensor.evcc_battery_mode_value`) — the automation pauses completely while evcc locks or charges the battery | *(none)* |
+| Mode when charging (`option_on_load`) | BMS mode while the automation is actively controlling charge | `pv_charge_limit` |
+| Mode when inactive (`option_off_load`) | BMS mode when the automation is not intervening | `auto` |
 | Battery capacity (`battery_capacity_kwh`) | Usable battery capacity — basis for power calculations (kWh) | `10.0` |
 | Target SOC at peak (`target_soc_at_peak`) | Desired SOC at the time of peak solar output — remaining headroom absorbs the midday surplus (%) | `55` |
 | SOC maximum (`soc_max`) | Above this SOC the automation switches to Auto — Fronius takes over feed-in management (%) | `97` |
@@ -112,13 +127,15 @@ The automation is deactivated (switches to `off_mode`) when:
 - Daily forecast is below the minimum threshold for activation (`forecast_limit`) — once enabled: below `forecast_limit − forecast_hysteresis`
 - Peak-hour energy is below the minimum threshold for activation (`peak_power_limit`) — once enabled: below `peak_power_limit − peak_power_hysteresis`
 
+While evcc controls the battery (`evcc_battery_mode_sensor`), the automation pauses completely and writes nothing, not even `off_mode`.
+
 ---
 
 ## My setup
 
 Tested with:
 - Fronius Symo Gen24 Plus 10.0 with BYD Battery Box Premium HV 20.38 kWh
-- [`fronius_modbus`](https://github.com/callifo/fronius_modbus) by [@callifo](https://github.com/callifo) (HACS) — the actively maintained fork I recommend
+- [`fronius_modbus`](https://github.com/callifo/fronius_modbus) by [@callifo](https://github.com/callifo) (HACS, 1.4.1) — the actively maintained fork I recommend
 - Open-Meteo Solar Forecast (HACS)
 - Shelly Pro 3EM as grid meter
 - evcc with Wattpilot and NRGKick

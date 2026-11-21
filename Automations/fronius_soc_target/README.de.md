@@ -2,7 +2,9 @@
 
 Ein Home Assistant Blueprint zur dynamischen Solarakku-Ladesteuerung — optimiert für Anlagen mit **Fronius-Wechselrichter**, **BYD Battery Box** und **Open-Meteo Solar Forecast**.
 
-**Aktuelle Version: v2** — behebt zwei im Betrieb gemessene Defekte der v1, siehe [Was v2 ändert](#was-v2-ändert). Benötigt einen zusätzlichen Helfer.
+**Aktuelle Version: v2** — behebt zwei Defekte der v1, siehe [Was v2 ändert](#was-v2-ändert). Benötigt einen zusätzlichen Helfer.
+
+**Update 21.11.2026:** angepasst an [`fronius_modbus`](https://github.com/callifo/fronius_modbus) **1.4.0**, das die Modusnamen auf Keys umgestellt hat (`Auto` → `auto`). Bestehende Automationen brauchen einen Handgriff, siehe [Umstieg auf fronius_modbus 1.4](#umstieg-auf-fronius_modbus-14).
 
 🇬🇧 [English version](/Automations/fronius_soc_target/README.md)
 
@@ -39,26 +41,38 @@ Wenn der Post-Peak-Solarertrag nicht ausreicht, um den Akku von `target_soc` auf
 
 Die v1 hatte zwei Defekte, die erst im Betrieb auffielen:
 
-**1. Die Rampe fiel auf Null zurück.** Die zuletzt gesetzte Ladeleistung wurde aus der Charge-Limit-`number` des BMS zurückgelesen. Diese Entität existiert nur im Modus `PV Charge Limit` — in `Auto` ist sie `unavailable`, und `float(0)` machte daraus eine harte 0 W. Die Rampe begann wieder bei Null (am 18.07.2026 dreimal innerhalb von 40 Minuten). v2 führt einen eigenen Merker als `input_number` und schreibt den Sollwert dort hinein, **bevor** die Number angefasst wird.
+**1. Die Rampe fiel auf Null zurück.** Die zuletzt gesetzte Ladeleistung wurde aus der Charge-Limit-`number` des BMS zurückgelesen. Diese Entität existiert nur im Modus `PV Charge Limit` — in `Auto` ist sie `unavailable`, und `float(0)` machte daraus eine harte 0 W. Die Rampe begann wieder bei Null. v2 führt einen eigenen Merker als `input_number` und schreibt den Sollwert dort hinein, **bevor** die Number angefasst wird.
 
 **2. Zufällige Zweigauswahl.** Die Netzleistung wurde als Momentanwert von einem Zähler gelesen, der sekündlich um Kilowatt springt — die Entscheidung „hoch oder runter" war damit fast ein Münzwurf. Der Fix steckt nicht im Blueprint: Gib ihm einen **geglätteten** Netzsensor (5-Minuten-Mittel über die Statistics-Integration) statt des Rohwerts.
 
-Ein dritter Fix fängt ab, dass der Peakzeit-Sensor während eines Reloads der Solarprognose kurz `unknown` ist — `as_datetime(None)` warf einen `AttributeError` und verwarf den kompletten Regelzyklus (10-mal am 30.08.2026). Ein solcher Zyklus wird jetzt still ausgelassen, der nächste Tick übernimmt.
+Ein dritter Fix fängt ab, dass der Peakzeit-Sensor während eines Reloads der Solarprognose kurz `unknown` ist — `as_datetime(None)` warf einen `AttributeError` und verwarf den kompletten Regelzyklus. Ein solcher Zyklus wird jetzt still ausgelassen, der nächste Tick übernimmt.
 
-**Prognose-Torwächter mit Hysterese (17.09.2026).** Die Automation steuert nur, solange Tagesprognose und Energie der Spitzenstunde über ihren Schwellen liegen. Open-Meteo rechnet die Prognose alle drei Stunden neu, und an Tagen knapp an einer Schwelle hat ein einzelnes Update die Steuerung mitten am Vormittag abgeschaltet — Modus `Auto`, kein Ladelimit, der Akku lud ungebremst. Im September 2026 passierte das an 5 von 17 Tagen bei der Spitzenstunde und an 3 bei der Tagesprognose; die prognostizierte Spitzenstunde schwankte innerhalb eines Tages im Median um 0,58 kWh. Beide Torwächter haben jetzt eine optionale Hysterese: Freigabe ab dem Schwellwert, Sperre erst unter *Schwellwert − Hysterese*. Ein `input_boolean` merkt sich, ob das Tor offen ist, und wird außerhalb des Steuerfensters zurückgesetzt — jeder Tag beginnt also wieder mit der Freigabeschwelle. Mit Hysterese `0` (Standard) bleibt das Verhalten unverändert.
+**Prognose-Torwächter mit Hysterese (17.09.2026).** Die Automation steuert nur, solange Tagesprognose und Energie der Spitzenstunde über ihren Schwellen liegen. Open-Meteo rechnet die Prognose alle drei Stunden neu, und an Tagen knapp an einer Schwelle hat ein einzelnes Update die Steuerung mitten am Vormittag abgeschaltet — Modus `Auto`, kein Ladelimit, der Akku lud ungebremst. Beide Torwächter haben jetzt eine optionale Hysterese: Freigabe ab dem Schwellwert, Sperre erst unter *Schwellwert − Hysterese*. Ein `input_boolean` merkt sich, ob das Tor offen ist, und wird außerhalb des Steuerfensters zurückgesetzt — jeder Tag beginnt also wieder mit der Freigabeschwelle. Mit Hysterese `0` (Standard) bleibt das Verhalten unverändert.
+
+**evcc hat Vorrang (Oktober 2026).** evcc schreibt seinen Batteriemodus per Modbus nur beim Wechsel. Jeder Lauf dieser Automation hat den Modus-Select gestellt — mindestens auf `auto` — und damit die Entladesperre von evcc beim Schnell- und Planladen aufgehoben. Mit dem optionalen `evcc_battery_mode_sensor` setzt die Automation jetzt komplett aus, solange evcc den Akku steuert (`hold`, `charge`, `holdcharge` und die deutschen Übersetzungen aus ha-evcc).
+
+---
+
+## Umstieg auf fronius_modbus 1.4
+
+`fronius_modbus` 1.4.0 (16.11.2026) liefert Enum-Zustände als Keys: Aus `Auto` wurde `auto`, aus `PV Charge Limit` wurde `pv_charge_limit` und so weiter. Der Blueprint bietet für `option_on_load` und `option_off_load` jetzt diese Keys an.
+
+Bestehende Automationen behalten die alten, gespeicherten Werte. Nach dem Blueprint-Update die Automation öffnen, beide Modi neu auswählen und speichern. Sonst wird `select.select_option` mit einer Option aufgerufen, die es nicht mehr gibt, und der Akku wird nicht gesteuert.
+
+Noch auf `fronius_modbus` 0.3.x? Dann die [vorherige Blueprint-Version](https://github.com/sbstn-0x2a/HA_Blueprints/blob/6fb0d5c/Automations/fronius_soc_target/bms_fronius_soc_target.yaml) behalten.
 
 ---
 
 ## Voraussetzungen
 
-- **Wechselrichter:** Fronius (mit BMS-Steuerung via Modbus, Integration [`fronius_modbus`](https://github.com/callifo/fronius_modbus) via HACS — empfohlen wird der Fork von [@callifo](https://github.com/callifo), der aktiv gepflegt wird)
+- **Wechselrichter:** Fronius (mit BMS-Steuerung via Modbus, Integration [`fronius_modbus`](https://github.com/callifo/fronius_modbus) **ab 1.4.0** via HACS — empfohlen wird der Fork von [@callifo](https://github.com/callifo), der aktiv gepflegt wird)
 - **Akku:** BYD Battery Box Premium HV (oder kompatibles BMS mit `select`-Modusentität und `number`-Ladeleistungsentität)
 - **Solarprognose:** [Open-Meteo Solar Forecast](https://github.com/flowolf/ha-open-meteo-solar-forecast) via HACS, mit `wh_period`-Attribut und einem *Remaining*-Sensor
 - **Stromzähler:** Beliebiger Energiezähler mit vorzeichenbehafteter Netzleistung (negativ = Einspeisung), z.B. Shelly Pro 3EM
 - **Helfer (erforderlich):** ein `input_number` als Merker für die zuletzt gesetzte Ladeleistung — siehe `package_bms_soc_target.yaml`
 - **Helfer (optional):** ein `input_boolean` als Torwächter-Merker, nur für die Prognose-Hysterese nötig — ebenfalls in `package_bms_soc_target.yaml`
 - **Geglätteter Netzsensor (dringend empfohlen):** ein 5-Minuten-Mittel der Netzleistung, angelegt über **Einstellungen → Geräte & Dienste → Helfer → Statistik**. Diesen Sensor als `grid_power_sensor` eintragen, nicht den Rohwert.
-- **E-Auto-Laden (optional):** [evcc](https://evcc.io/) mit [ha-evcc](https://github.com/marq24/ha-evcc) HACS Integration und binären `connected`-Sensoren je Ladepunkt
+- **E-Auto-Laden (optional):** [evcc](https://evcc.io/) mit [ha-evcc](https://github.com/marq24/ha-evcc) HACS Integration und binären `connected`-Sensoren je Ladepunkt, optional dazu der Batteriemodus-Sensor
 ---
 
 ## Konfiguration
@@ -75,8 +89,9 @@ Ein dritter Fix fängt ab, dass der Peakzeit-Sensor während eines Reloads der S
 | Ladeleistungs-Entität (`charge_limit_number`) | Number-Entität für die Ladeleistungsvorgabe ans BMS (W) | — |
 | Merker letzter Sollwert (`last_cmd_helper`) | `input_number`, der die zuletzt gesetzte Ladeleistung speichert — v2, verhindert das Zurückfallen der Rampe | — |
 | E-Auto angesteckt (`ev_connected_sensor_1/2`) | Optional: EVCC Binary Sensor je Ladepunkt — Automation ist inaktiv solange ein Auto angesteckt ist | *(keiner)* |
-| Modus bei aktivem Laden (`option_on_load`) | BMS-Betriebsmodus solange die Automation aktiv lädt | `PV Charge Limit` |
-| Modus bei inaktivem Laden (`option_off_load`) | BMS-Betriebsmodus wenn die Automation nicht eingreift | `Auto` |
+| evcc-Batteriemodus (`evcc_battery_mode_sensor`) | Optional: evcc-Sensor mit dem aktuellen Batteriemodus (z.B. `sensor.evcc_battery_mode_value`) — die Automation setzt komplett aus, solange evcc den Akku sperrt oder lädt | *(keiner)* |
+| Modus bei aktivem Laden (`option_on_load`) | BMS-Betriebsmodus solange die Automation aktiv lädt | `pv_charge_limit` |
+| Modus bei inaktivem Laden (`option_off_load`) | BMS-Betriebsmodus wenn die Automation nicht eingreift | `auto` |
 | Akku-Kapazität (`battery_capacity_kwh`) | Nutzbare Kapazität des Akkus — Grundlage für die Leistungsberechnung (kWh) | `10.0` |
 | Ziel-SOC bei Peak (`target_soc_at_peak`) | Gewünschter Ladestand zum Zeitpunkt des Leistungspeaks — der verbleibende Puffer absorbiert die solare Mittagsspitze (%) | `55` |
 | SOC-Maximum (`soc_max`) | Ab diesem Ladestand schaltet die Automation auf Auto — der Fronius übernimmt dann das Einspeisemanagement (%) | `97` |
@@ -111,13 +126,15 @@ Die Automation schaltet in den Ruhemodus wenn:
 - Prognostizierter Tagesertrag liegt unter dem Mindest-Schwellwert für Aktivierung (`forecast_limit`) — nach Freigabe erst unter `forecast_limit − forecast_hysteresis`
 - Prognostizierte Peak-Stundenenergie liegt unter dem Mindest-Schwellwert für Aktivierung (`peak_power_limit`) — nach Freigabe erst unter `peak_power_limit − peak_power_hysteresis`
 
+Solange evcc den Akku steuert (`evcc_battery_mode_sensor`), setzt die Automation komplett aus und schreibt nichts, auch nicht `off_mode`.
+
 ---
 
 ## Mein Setup
 
 Getestet mit:
 - Fronius Symo Gen24 Plus 12.0 SC mit BYD Battery Box Premium HVS 20.38 kWh
-- [`fronius_modbus`](https://github.com/callifo/fronius_modbus) von [@callifo](https://github.com/callifo) (HACS) — der aktiv gepflegte Fork, den ich empfehle
+- [`fronius_modbus`](https://github.com/callifo/fronius_modbus) von [@callifo](https://github.com/callifo) (HACS, 1.4.1) — der aktiv gepflegte Fork, den ich empfehle
 - Open-Meteo Solar Forecast (HACS)
 - Shelly Pro 3EM als Stromzähler
 - evcc mit Wattpilot und NRGKick
